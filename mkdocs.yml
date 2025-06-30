@@ -1,0 +1,93 @@
+site_name: Panopti
+site_url: https://armanmaesumi.github.io/panopti
+repo_name: 'ArmanMaesumi/panopti'
+repo_url: https://github.com/ArmanMaesumi/panopti
+
+theme:
+  logo: ./assets/images/logo_white_hollow.svg
+  name: material
+  font:
+    text: LibertinusSans
+    code: Roboto Mono
+  icon:
+    logo: logo-monochrome
+    admonition:
+      note: octicons/tag-16
+      abstract: octicons/checklist-16
+      info: octicons/info-16
+      tip: octicons/squirrel-16
+      success: octicons/check-16
+      question: octicons/question-16
+      warning: octicons/alert-16
+      failure: octicons/x-circle-16
+      danger: octicons/zap-16
+      bug: octicons/bug-16
+      example: material/code-block-tags
+      quote: octicons/quote-16
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.path
+    - navigation.indexes
+    - navigation.instant
+  palette: 
+    - scheme: default
+      toggle:
+        icon: material/brightness-7 
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+extra_css:
+  - css/main.css
+
+nav:
+  - Home: index.md
+  - Getting started: getting_started.md
+  - Remote SSH: remote_ssh.md
+  - About: about.md
+  - Examples:
+      - Importing geometry: examples/importing_geometry.md
+      - "Controls & Callbacks": examples/controls_callbacks.md
+      - "Viewer State & Events": examples/viewer_state_events.md
+  - Geometry:
+      - Meshes: geometry/mesh.md
+      - Animated Meshes: geometry/animated_mesh.md
+      - Point Clouds: geometry/point_cloud.md
+      - Arrows: geometry/arrows.md
+  - Interaction:
+      - Controls: controls.md
+      - Viewer Events: events.md
+  - Viewer Features:
+      # - Camera: viewer/camera.md
+      # - Transformations: viewer/transformations.md
+      - Console Mirroring: viewer/console_mirroring.md
+  # - To-do list: todo.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: false
+
+markdown_extensions:
+  - codehilite
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - admonition
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.smartsymbols
+
+extra_javascript:
+  - js/toggle-admonitions.js
+
