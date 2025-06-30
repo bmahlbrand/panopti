@@ -1,5 +1,5 @@
 # Panopti - interactive 3D visualization in Python
-![Logo](./docs/assets/images/panopti_logo.jpg)
+![Logo](./assets/banner.jpg)
 
 ## [ [Documentation](https://armanmaesumi.github.io/panopti/) ] - [ [PyPI](https://pypi.org/project/panopti/) ]
 
