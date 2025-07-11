@@ -15,33 +15,67 @@ export function toggleObjectVisibility(sceneManagerRef, sceneObjects, objectId, 
     if (!sceneManagerRef.current) return;
     const obj = sceneObjects.find(o => o.id === objectId);
     if (!obj) return;
+    
+    // Get the current material opacity from the scene object
+    let currentOpacity = 1.0;
+    if (obj.data.material && obj.data.material.opacity !== undefined) {
+        currentOpacity = obj.data.material.opacity;
+    } else if (obj.data.opacity !== undefined) {
+        currentOpacity = obj.data.opacity;
+    }
+    
     let newVisibility = 'visible';
-    let opacity = 1.0;
-    if (obj.visible && obj.data.opacity === 1.0) {
+    let newOpacity = 1.0;
+    
+    if (obj.visible && currentOpacity === 1.0) {
+        // Going from visible to semi-visible
+        // Use original opacity if it was less than 1.0, otherwise use 0.3
         newVisibility = 'semi';
-        opacity = 0.3;
-    } else if (obj.visible && obj.data.opacity < 1.0) {
+        newOpacity = (obj.data.originalOpacity && obj.data.originalOpacity < 1.0) ? obj.data.originalOpacity : 0.3;
+    } else if (obj.visible && currentOpacity < 1.0) {
+        // Going from semi-visible to hidden
         newVisibility = 'hidden';
     } else {
+        // Going from hidden to visible - restore original opacity
         newVisibility = 'visible';
-        opacity = 1.0;
+        newOpacity = 1.0;
     }
-    let thisObject = sceneObjects.find(o => o.id === objectId);
-    if (thisObject.type === 'arrows' && newVisibility === 'semi') {
-        // For arrows we will just have visible / hidden, no opacity mode
-        newVisibility = 'hidden';
+
+    // For arrows toggle between [visible OR semi-visible (if opacity given)] and hidden
+    if (obj.type === 'arrows') {
+        if (newVisibility === 'semi' && obj.data.originalOpacity && obj.data.originalOpacity === 1.0) {
+            newVisibility = 'hidden';
+            newOpacity = 0.0;
+        }
     }
-    const updates = { visible: newVisibility !== 'hidden', opacity };
+
+    const updates = { visible: newVisibility !== 'hidden' };
     const updatedObj = sceneManagerRef.current.updateObject(objectId, updates);
+    
     if (
         updatedObj &&
         (updatedObj.type === 'mesh' || updatedObj.type === 'points' || updatedObj.type == 'arrows' || updatedObj.type == 'animated_mesh') &&
         updatedObj.object.material
     ) {
-        updatedObj.object.material.opacity = opacity;
-        updatedObj.object.material.transparent = opacity < 1.0;
+        // Update the material's opacity directly
+        updatedObj.object.material.opacity = newOpacity;
+        updatedObj.object.material.transparent = newOpacity < 1.0;
         updatedObj.object.material.needsUpdate = true;
+        
+        // Also update the material data in the object's data structure
+        if (updatedObj.type === 'points') {
+            // For points, update the direct opacity field
+            updatedObj.data.opacity = newOpacity;
+        } else {
+            // For meshes, update the material data
+            if (!updatedObj.data.material) {
+                updatedObj.data.material = {};
+            }
+            updatedObj.data.material.opacity = newOpacity;
+            updatedObj.data.material.transparent = newOpacity < 1.0;
+        }
     }
+    
     updateSceneObjectsList();
 }
 
@@ -70,21 +104,41 @@ export function getObjectIcon(type) {
 export function getVisibilityIconClass(obj) {
     if (!obj.visible) {
         return 'fas fa-eye-slash visibility-hidden';
-    } else if (obj.data.opacity < 1.0) {
-        return 'fas fa-eye-low-vision visibility-semi';
     } else {
-        return 'fas fa-eye visibility-visible';
+        // Check opacity
+        let opacity = 1.0;
+        if (obj.data.material && obj.data.material.opacity !== undefined) {
+            opacity = obj.data.material.opacity;
+        } else if (obj.data.opacity !== undefined) {
+            opacity = obj.data.opacity;
+        }
+        
+        if (opacity < 1.0) {
+            return 'fas fa-eye visibility-semi';
+        } else {
+            return 'fas fa-eye visibility-visible';
+        }
     }
 }
 
-export function renderLayersPanel(sceneObjects, selectedObject, setSelectedObject, sceneManagerRef, updateSceneObjectsList) {
+export function renderLayersPanel(sceneObjects, selectedObject, setSelectedObject, sceneManagerRef, updateSceneObjectsList, isCollapsed, onToggleCollapse) {
     return React.createElement(
         'div',
-        { className: 'layers-panel' },
+        { className: `layers-panel${isCollapsed ? ' collapsed' : ''}` },
         React.createElement(
             'div',
             { className: 'layers-panel-header' },
-            React.createElement('h3', null, 'Layers')
+            React.createElement('h3', null, 'Objects'),
+            React.createElement(
+                'button',
+                {
+                    className: 'collapse-layers-btn tooltip',
+                    'data-tooltip': isCollapsed ? 'Expand' : 'Collapse',
+                    onClick: (e) => { e.stopPropagation(); onToggleCollapse && onToggleCollapse(); },
+                    style: { transform: isCollapsed ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }
+                },
+                React.createElement('i', { className: 'fas fa-chevron-down' })
+            )
         ),
         React.createElement(
             'div',

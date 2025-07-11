@@ -20,9 +20,10 @@ export function cameraData(camera, controls) {
     // Grabs relevant data from scene camera:
     const camData = {
         position: camera.position.toArray(),
-        rotation: camera.rotation.toArray(),
+        rotation: camera.rotation.toArray().slice(0,3), // Remove order parameter
         quaternion: camera.quaternion.toArray(),
         up: camera.up.toArray(),
+        projection_mode: camera.isOrthographicCamera ? 'orthographic' : 'perspective',
         fov: camera.fov,
         near: camera.near,
         far: camera.far,
@@ -87,3 +88,49 @@ export function pythonRGBAToJS(rgba) {
     console.warn('Unexpected color format:', rgba);
     return { r: 255, g: 0, b: 0, a: 1 }; // Default to bright red for error
 }
+
+/**
+ * Wraps an animation loop function so it can be executed at a specific frame-rate
+ * loop {Function}  = The function you want to execute each frames
+ * fps {Number}     = The desired frame rate
+ * source : https://woodenraft.games/blog/how-to-implement-consistent-frame-rate-threejs
+ */
+export function createFpsCap(loop, fps = 60) {
+    console.log('createFpsCap', fps);
+    let targetFps = 0, fpsInterval = 0;
+    let lastTime = 0, lastOverTime = 0, prevOverTime = 0, deltaTime = 0;
+  
+    function updateFps(value) {
+      targetFps = value;
+      fpsInterval = 1000 / targetFps;
+    }
+  
+    updateFps(fps);
+  
+    return {
+      // the targeted frame rate
+      get fps() {
+        return targetFps;
+      },
+      set fps(value) {
+        updateFps(value);
+      },
+  
+      // the frame-capped loop function
+      loop: function(time) {
+        deltaTime = time - lastTime;
+  
+        if(deltaTime < fpsInterval) {
+          return;
+        }
+  
+        prevOverTime = lastOverTime;
+        lastOverTime = deltaTime % fpsInterval;
+        lastTime = time - lastOverTime;
+  
+        deltaTime -= prevOverTime;
+  
+        return loop(deltaTime);
+      },
+    };
+  }

@@ -3,6 +3,8 @@ from typing import Any, Dict
 import numpy as np
 import math
 import numbers
+from ..utils.parse import as_list, as_array
+from panopti.materials.base import BaseMaterial
 
 class SceneObject:
     def __init__(self, viewer, name: str):
@@ -22,14 +24,15 @@ class SceneObject:
                     if msg not in self.warnings:
                         self.warnings.append(msg)
                 continue
+            # For non-ndarray values, try to convert to array and check
             try:
                 arr = np.asarray(value, dtype=float)
+                if np.isnan(arr).any():
+                    msg = f"NaN detected in {attr}"
+                    if msg not in self.warnings:
+                        self.warnings.append(msg)
             except Exception:
                 continue
-            if np.isnan(arr).any():
-                msg = f"NaN detected in {attr}"
-                if msg not in self.warnings:
-                    self.warnings.append(msg)
     
     def _sanitize_for_json(self, value):
         """Convert NaNs to ``None`` for JSON serialization using simple loops."""
@@ -43,7 +46,10 @@ class SceneObject:
         if isinstance(value, numbers.Number):
             if isinstance(value, float) and math.isnan(value):
                 return None
-            return float(value) if isinstance(value, np.generic) else value
+            # Convert numpy scalars to Python scalars
+            if isinstance(value, np.generic):
+                return value.item()
+            return value
 
         if isinstance(value, dict):
             sanitized = {}
@@ -56,19 +62,35 @@ class SceneObject:
 
         return value
 
+    def _to_serializable(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert object data to JSON-serialisable format for socket transmission."""
+        # First sanitize for NaNs, then convert to lists
+        sanitized = self._sanitize_for_json(data)
+        return as_list(sanitized)
+
+    def _from_serializable(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert serialised data back to numpy arrays for internal use."""
+        return as_array(data)
+
     def update(self, **kwargs) -> None:
-        """UUpdates this object's attributes and propagate updates to the viewer."""
+        """Updates this object's attributes and propagate updates to the viewer."""
+        converted_kwargs = {}
         for key, value in kwargs.items():
             if hasattr(self, key):
-                setattr(self, key, value)
+                if isinstance(value, BaseMaterial):
+                    # For materials, use the raw dict without converting to arrays
+                    converted_kwargs[key] = value.to_dict()
+                    setattr(self, key, value)
+                else:
+                    converted_kwargs[key] = as_array(value)
+                    setattr(self, key, converted_kwargs[key])
 
-        self._check_for_nans(**kwargs)
-        data = dict(kwargs)
+        self._check_for_nans(**converted_kwargs)
+        data = dict(converted_kwargs)
         if self.warnings:
             data['warnings'] = self.warnings
-        sanitized = self._sanitize_for_json(data)
-
-        self.viewer.socket_manager.emit_update_object(self, sanitized)
+        sanitized = self._to_serializable(data)
+        self.viewer.socket_manager.emit_update_object(self, sanitized, raw_data=data)
     
     def delete(self) -> None:
         if self.name in self.viewer.objects:

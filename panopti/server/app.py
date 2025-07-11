@@ -2,6 +2,7 @@
 import os
 import uuid
 from flask import Flask, render_template, send_from_directory, request, Response, jsonify
+from panopti.utils.parse import decode_msgpack, encode_msgpack, as_list
 from flask_socketio import SocketIO, join_room
 import pkg_resources
 import json
@@ -9,6 +10,7 @@ import json
 import panopti.objects as PanoptiObjects
 from panopti.objects.utils import export_object_from_dict
 from .handlers import register_handlers, _update_viewer_state
+from panopti.config import load_config
 
 template_path = pkg_resources.resource_filename(
     "panopti", "server/static/templates"
@@ -19,9 +21,11 @@ manifest_path = pkg_resources.resource_filename(
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = json.load(f)
 
-def create_app():
+def create_app(config_path: str = None, debug: bool = False):
     app = Flask(__name__, template_folder=template_path)
     app.config['SECRET_KEY'] = 'secret!'
+    app.config['DEBUG'] = debug
+    app.config['VITE_DEV_SERVER'] = os.environ.get('VITE_DEV_SERVER')
     
     socketio = SocketIO(app, 
                         cors_allowed_origins="*", 
@@ -32,6 +36,9 @@ def create_app():
     app.config['CLIENT_VIEWERS'] = {}  # Store registered clients
     app.config['HTTP_EVENTS'] = {}
     
+    # Load configuration at startup
+    app.config['PANOPTI_CONFIG'] = load_config(config_path)
+
     def _handle_missing_viewer_id(data):
         """Handle cases where viewer_id is not provided."""
         if not data or 'viewer_id' not in data:
@@ -43,7 +50,8 @@ def create_app():
     def index():
         # Check if viewer_id was specified in query params
         viewer_id = request.args.get('viewer_id')
-        return render_template('index.html', viewer_id=viewer_id, bundle=manifest)
+        is_dev = app.config['DEBUG'] and app.config['VITE_DEV_SERVER']
+        return render_template('index.html', viewer_id=viewer_id, bundle=manifest, config=app.config['PANOPTI_CONFIG'], is_dev=is_dev)
     
     @app.route('/static/<path:path>')
     def serve_static(path):
@@ -78,7 +86,10 @@ def create_app():
 
     @app.route('/http_event', methods=['POST'])
     def handle_http_event():
-        payload = request.get_json()
+        if request.content_type == 'application/msgpack':
+            payload = decode_msgpack(request.get_data())
+        else:
+            payload = request.get_json()
         if not payload:
             return {"status": "error", "message": "no payload"}, 400
         event = payload.get('event')
@@ -88,7 +99,7 @@ def create_app():
             data['viewer_id'] = viewer_id
         token = uuid.uuid4().hex
         app.config['HTTP_EVENTS'][token] = data
-        _update_viewer_state(event, data)
+        _update_viewer_state(event, as_list(data))
         socketio.emit(
             'http_event',
             {
@@ -105,7 +116,8 @@ def create_app():
         data = app.config['HTTP_EVENTS'].get(token)
         if data is None:
             return "not found", 404
-        return jsonify(data)
+        packed = encode_msgpack(data)
+        return Response(packed, mimetype='application/msgpack')
     
     @socketio.on('connect')
     def handle_connect():
@@ -166,14 +178,20 @@ def create_app():
         viewer_id = data.get('viewer_id')
         socketio.emit('request_selected_object', data or {}, room=viewer_id)
 
+    @socketio.on('request_screenshot')
+    def handle_request_screenshot(data):
+        _handle_missing_viewer_id(data)
+        viewer_id = data.get('viewer_id')
+        socketio.emit('request_screenshot', data or {}, room=viewer_id)
+
     # General function that lets the client request simple state information from the frontend
     @socketio.on('relay_state_request')
     def handle_relay_state_request(data):
         _handle_missing_viewer_id(data)
         viewer_id = data.get('viewer_id')
         event_str = data.get('event')
-        print(f"Relay state request for viewer ID: {viewer_id}, event: {event_str}")
-        socketio.emit(event_str, {'viewer_id': viewer_id}, room=viewer_id)
+        req_data = data.get('data', {})
+        socketio.emit(event_str, req_data, room=viewer_id)
 
     @socketio.on('restart_script')
     def handle_restart_script(data=None):
@@ -198,8 +216,8 @@ def create_app():
 
     return app
 
-def run_standalone_server(host='localhost', port=8080, debug=False):
-    app = create_app()
+def run_standalone_server(host='localhost', port=8080, debug=False, config_path: str = None):
+    app = create_app(config_path, debug=debug)
     socketio = app.config['SOCKETIO']
     print(f"Starting standalone server at http://{host}:{port}")
     socketio.run(app, host=host, port=port, debug=debug, use_reloader=False)

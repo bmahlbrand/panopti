@@ -8,6 +8,7 @@ import os
 import sys
 import eventlet
 from eventlet import event
+import io
 
 from .server.app import create_app
 from .comms.websocket import SocketManager, RemoteSocketIO
@@ -16,7 +17,17 @@ from .objects.mesh import Mesh
 from .objects.animated_mesh import AnimatedMesh
 from .objects.points import Points
 from .objects.arrows import Arrows
+
 from .ui.controls import Slider, Button, Label, Checkbox, Dropdown, DownloadButton, PlotlyPlot, ColorPicker
+from .utils.parse import as_array, as_list
+
+# Default camera parameters used when a new frontend client connects.
+DEFAULT_CAMERA_STATE = {
+    'projection_mode': 'perspective',
+    'fov': 50,
+    'near': 0.1,
+    'far': 1000,
+}
 
 class BaseViewer:
     """Base class for both standalone and client viewers"""
@@ -24,22 +35,37 @@ class BaseViewer:
         self.objects = {}
         self.ui_controls = {}
         self.socket_manager = SocketManager(self)
-
         self.events = EventDispatcher(self)
-
         self._camera_thread = threading.Event()
         self._camera_data = None
         self._selected_object_thread = threading.Event()
         self._selected_object = None
+        self._print_buffer = io.StringIO()  # Always present from the start
 
     def capture_prints(self, buffer=None, capture_stderr=False):
         """Mirrors prints in the viewer."""
         from .utils.print_capture import capture_prints as cap
+        # Always use the persistent buffer
+        buf = cap(buffer=self._print_buffer, capture_stderr=capture_stderr, callback=self._emit_console_callback())
+        return buf
 
-        def _callback(data: str):
-            self.socket_manager.emit_console_output(data)
-
-        return cap(buffer=buffer, capture_stderr=capture_stderr, callback=_callback)
+    def _emit_console_callback(self):
+        def _callback(segments):
+            self.socket_manager.emit_console_output(segments)
+        return _callback
+    
+    def print_colored(self, text: str, color: str = None, end: str = '\n'):
+        """Print colored text directly to the viewer console.
+        
+        Parameters:
+            text (str): The text to print
+            color (str): Optional color name: white, red, green, yellow, blue, magenta, 
+                   bright-red, bright-green, bright-yellow, bright-blue, bright-magenta
+            end (str): The end character to print (default is `\\n`)
+        """
+        text += end
+        segments = [{'text': text, 'color': color}]
+        self.socket_manager.emit_console_output(segments)
 
     def hold(self):
         """Keep the script alive"""
@@ -47,11 +73,10 @@ class BaseViewer:
         try:
             evt.wait()            # blocks until someone calls evt.send()
         except KeyboardInterrupt:
-            print("Exiting…")
+            print("Exiting...")
 
     def restart(self):
         """Restart the current Python process."""
-        print("Restarting script...")
         module = getattr(sys.modules['__main__'], '__spec__', None)
         module = module.name if module and module.name else None
 
@@ -69,29 +94,30 @@ class BaseViewer:
         self.socket_manager.emit_add_control(control)
         return control
     
-    def add_mesh(self, vertices: np.ndarray, faces: np.ndarray, name: str, wireframe: bool = False,
-                visible: bool = True, opacity: float = 1.0,
-                position: Tuple[float, float, float] = (0, 0, 0),
-                rotation: Tuple[float, float, float] = (0, 0, 0),
-                scale: Tuple[float, float, float] = (1, 1, 1),
-                color: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+    def add_mesh(self,
+                vertices: np.ndarray, 
+                faces: np.ndarray,
+                name: str,
+                visible: bool = True,
+                position: Union[Tuple[float, float, float], np.ndarray] = (0, 0, 0),
+                rotation: Union[Tuple[float, float, float], np.ndarray] = (0, 0, 0),
+                scale: Union[Tuple[float, float, float], np.ndarray] = (1.0, 1.0, 1.0),
                 vertex_colors: np.ndarray = None,
-                face_colors: np.ndarray = None) -> Mesh:
+                face_colors: np.ndarray = None,
+                material: Optional[Any] = None) -> Mesh:
         """Adds a Mesh object to the viewer.
 
         Parameters:
             vertices: (V, 3) array of vertex coordinates.
             faces: (F, 3) array of face indices.
             name: Name for the mesh.
-            wireframe: Whether to render the mesh as a wireframe.
             visible: Whether the mesh is visible.
-            opacity: Opacity of the mesh.
             position: Position of the mesh (XYZ).
             rotation: Rotation of the mesh (XYZ).
             scale: Scale of the mesh in (XYZ).
-            color: Uniform RGB color of the mesh.
             vertex_colors: (V, 3) array of vertex colors.
             face_colors: (F, 3) array of face colors.
+            material: Panopti material object.
 
         Returns:
             Mesh: The created panopti mesh object.
@@ -104,15 +130,13 @@ class BaseViewer:
             vertices=vertices,
             faces=faces,
             name=name,
-            wireframe=wireframe,
             visible=visible,
-            opacity=opacity,
             position=position,
             rotation=rotation,
             scale=scale,
-            color=color,
             vertex_colors=vertex_colors,
-            face_colors=face_colors
+            face_colors=face_colors,
+            material=material
         )
         
         self.objects[name] = mesh
@@ -120,14 +144,18 @@ class BaseViewer:
         
         return mesh
     
-    def add_animated_mesh(self, vertices: np.ndarray, faces: np.ndarray, name: str, framerate: float = 24.0,
-                         wireframe: bool = False, visible: bool = True, opacity: float = 1.0,
-                         position: Tuple[float, float, float] = (0, 0, 0),
-                         rotation: Tuple[float, float, float] = (0, 0, 0),
-                         scale: Tuple[float, float, float] = (1, 1, 1),
-                         color: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+    def add_animated_mesh(self, 
+                         vertices: np.ndarray, 
+                         faces: np.ndarray, 
+                         name: str, framerate: float = 24.0,
+                         visible: bool = True,
+                         position: Union[Tuple[float, float, float], np.ndarray] = (0, 0, 0),
+                         rotation: Union[Tuple[float, float, float], np.ndarray] = (0, 0, 0),
+                         scale: Union[Tuple[float, float, float], np.ndarray] = (1.0, 1.0, 1.0),
+                         color: Union[Tuple[float, float, float], np.ndarray] = (1.0, 1.0, 1.0),
                          vertex_colors: np.ndarray = None,
-                         face_colors: np.ndarray = None) -> AnimatedMesh:
+                         face_colors: np.ndarray = None,
+                         material: Optional[Any] = None) -> AnimatedMesh:
         """Adds an AnimatedMesh object to the viewer.
 
         Parameters:
@@ -135,15 +163,14 @@ class BaseViewer:
             faces: (F, 3) array of face indices.
             name: Name for the animated mesh.
             framerate: Framerate for the animation.
-            wireframe: Whether to render the mesh as a wireframe.
             visible: Whether the mesh is visible.
-            opacity: Opacity of the mesh.
             position: Position of the mesh (XYZ).
             rotation: Rotation of the mesh (XYZ).
             scale: Scale of the mesh in (XYZ).
             color: Uniform RGB color of the mesh.
             vertex_colors: (V, 3) array of vertex colors.
             face_colors: (F, 3) array of face colors.
+            material: Panopti material object.
 
         Returns:
             AnimatedMesh: The created panopti animated mesh object.
@@ -158,15 +185,14 @@ class BaseViewer:
             faces=faces,
             name=name,
             framerate=framerate,
-            wireframe=wireframe,
             visible=visible,
-            opacity=opacity,
             position=position,
             rotation=rotation,
             scale=scale,
             color=color,
             vertex_colors=vertex_colors,
-            face_colors=face_colors
+            face_colors=face_colors,
+            material=material
         )
         
         self.objects[name] = animated_mesh
@@ -174,9 +200,13 @@ class BaseViewer:
         
         return animated_mesh
     
-    def add_points(self, points: np.ndarray, name: str,
-                 colors: np.ndarray = (0.5, 0.5, 0.5),
-                 size: float = 0.01, visible: bool = True, opacity: float = 1.0) -> Points:
+    def add_points(self, 
+                   points: np.ndarray, 
+                   name: str,
+                   colors: Union[Tuple[float, float, float], np.ndarray] = (0.5, 0.5, 0.5),
+                   size: float = 0.01, 
+                   visible: bool = True, 
+                   opacity: float = 1.0) -> Points:
         """Adds a Point Cloud object to the viewer.
 
         Parameters:
@@ -208,9 +238,14 @@ class BaseViewer:
         
         return points_obj
     
-    def add_arrows(self, starts: np.ndarray, ends: np.ndarray, name: str,
-                 color: np.ndarray = (0, 0, 0),
-                 width: float = 0.01, visible: bool = True, opacity: float = 1.0) -> Arrows:
+    def add_arrows(self, 
+                   starts: np.ndarray,
+                   ends: np.ndarray, 
+                   name: str,
+                   color: Union[Tuple[float, float, float], np.ndarray] = (0, 0, 0),
+                   width: float = 0.01, 
+                   visible: bool = True, 
+                   opacity: float = 1.0) -> Arrows:
         """Adds an Arrows object to the viewer.
 
         Parameters:
@@ -307,7 +342,7 @@ class BaseViewer:
         )
 
     def color_picker(self, callback: Callable, name: str,
-                     initial: Tuple[float, float, float, float] = (0.5, 0.5, 0.5, 1.0)) -> ColorPicker:
+                     initial: Union[Tuple[float, float, float, float], np.ndarray] = (0.5, 0.5, 0.5, 1.0)) -> ColorPicker:
 
         return self._add_control(
             ColorPicker,
@@ -372,7 +407,7 @@ class ViewerClient(BaseViewer):
         # State requests:
         self.client.on('request_state_from_client', self.handle_request_state)
 
-        self._request_events = ['camera_info', 'selected_object']
+        self._request_events = ['camera_info', 'selected_object', 'screenshot']
         self._request_threads = {k: threading.Event() for k in self._request_events}
         self._request_data = {k: None for k in self._request_events}
         for event in self._request_events:
@@ -382,9 +417,18 @@ class ViewerClient(BaseViewer):
         self.client.on('events.camera', self.handle_events_camera)
         self.client.on('events.inspect', self.handle_events_inspect)
         self.client.on('events.select_object', self.handle_events_select_object)
+        self.client.on('events.gizmo', self.handle_events_gizmo)
         # events.control is handled internally
         # events.update_object is handled internally
-    
+
+        self.client.on('viewer_heartbeat', self.handle_heartbeat)
+
+    # --- Heartbeat (call and response): ---
+    def handle_heartbeat(self, data):
+        if data.get('viewer_id') != self.viewer_id:
+            return
+        self.socket_manager.emit('client_heartbeat', {'viewer_id': self.viewer_id})
+
     def handle_ui_event_from_server(self, data):
         if data.get('viewer_id') != self.viewer_id:
             return
@@ -392,11 +436,13 @@ class ViewerClient(BaseViewer):
         event_type = data.get('eventType')
         control_id = data.get('controlId')
         value = data.get('value')
+        value = as_array(value)
         
         self.handle_ui_event(event_type, control_id, value)
         self.events.trigger('control', control_id, value)
 
     def handle_update_object(self, data):
+        # TODO Come back to this
         if data.get('viewer_id') != self.viewer_id:
             return
         obj_id = data.get('id')
@@ -404,9 +450,20 @@ class ViewerClient(BaseViewer):
         obj = self.objects.get(obj_id)
         if not obj:
             return
+        updates = as_array(updates)
         for key, value in updates.items():
             if hasattr(obj, key):
-                setattr(obj, key, value)
+                # Handle material updates specially - convert dict back to material object
+                if key == 'material' and isinstance(value, dict) and 'type' in value:
+                    from .materials.utils import create_material_from_dict
+                    try:
+                        material_obj = create_material_from_dict(value)
+                        setattr(obj, key, material_obj)
+                    except Exception as e:
+                        print(f"Warning: Could not recreate material from dict: {e}")
+                        setattr(obj, key, value)
+                else:
+                    setattr(obj, key, value)
         self.events.trigger('update_object', obj_id, updates)
 
     def handle_restart_script(self, data):
@@ -416,23 +473,50 @@ class ViewerClient(BaseViewer):
 
     # --- Requesting state: ---
     def handle_request_state(self, data=None):
-        """Send all current objects and UI controls to the client"""
+        """Send all current objects, UI controls, and print history to the client"""
+        # Reset the camera to default parameters for a fresh session
+        self.socket_manager.emit_with_fallback(
+            'set_camera',
+            {'camera': as_list(DEFAULT_CAMERA_STATE)}
+        )
         
         # Send all objects
         for obj in self.objects.values():
             if hasattr(obj, 'to_dict'):
                 self.socket_manager.emit_add_geometry(obj)
-        
+
         # Send all UI controls
         for control in self.ui_controls.values():
             if hasattr(control, 'to_dict'):
                 self.socket_manager.emit_add_control(control)
 
+        # Send print history if available
+        text = self._print_buffer.getvalue()
+        if text:
+            from .utils.print_capture import split_text_to_segments
+            segments = split_text_to_segments(text)
+            self.socket_manager.emit_console_output(segments)
+
     def camera(self, timeout: float = 1.0) -> Optional[Dict[str, Any]]:
-        """Return the current camera parameters as a dictionary."""
+        """Return the current camera parameters as a dictionary containing:
+        
+        | key        | meaning                                   | type  |
+        |------------|-------------------------------------------|-------|
+        | position   | camera world coords                       | ndarray |
+        | rotation   | camera XYZ euler rotation                 | ndarray |
+        | quaternion | camera rotation as quaternion             | ndarray |
+        | up         | camera up-vector                          | ndarray |
+        | target     | point the camera is looking at            | ndarray |
+        | fov        | vertical field-of-view (degrees)          | float |
+        | near       | near-plane distance                       | float |
+        | far        | far-plane distance                        | float |
+        | aspect     | viewport aspect ratio (w / h)             | float |
+        | projection_mode | 'perspective' or 'orthographic'       | str   |
+        """
         self.emit_state_request({'event': 'request_camera_info', 'viewer_id': self.viewer_id})
         if self._request_threads['camera_info'].wait(timeout):
-            return self._request_data['camera_info']
+            camera_data = as_array(self._request_data['camera_info'])
+            return camera_data
         return None
     
     def selected_object(self, timeout: float = 1.0) -> Optional[str]:
@@ -442,19 +526,88 @@ class ViewerClient(BaseViewer):
             return self._request_data['selected_object']
         return None
 
+    def screenshot(self, filename: str = None, bg_color: Optional[Union[Tuple[float, float, float], np.ndarray]] = None,
+                   timeout: float = 2.0) -> Optional[np.ndarray]:
+        """Capture a screenshot from the frontend viewer.
+
+        Parameters:
+            filename (str or None): If provided, the image will be saved to this path. Supported extensions are `png` (default), `jpg`, and `jpeg`.
+            bg_color (tuple or None): Background color as RGB values in [0,1] range. ``None`` results in a transparent background.
+            timeout (float): How long to wait for the screenshot data from the frontend. Default is 2 seconds.
+
+        Returns:
+            np.ndarray or None: RGB/RGBA image array, or ``None`` if the request timed out.
+        """
+        data = {'viewer_id': self.viewer_id}
+        if bg_color is not None:
+            data['bg_color'] = list(bg_color)
+        self.emit_state_request({'event': 'request_screenshot', 'viewer_id': self.viewer_id, 'data': data})
+        if self._request_threads['screenshot'].wait(timeout):
+            img_b64 = self._request_data['screenshot']
+            if not img_b64:
+                return None
+            import base64, io
+            from PIL import Image
+            header, b64data = img_b64.split(',', 1) if ',' in img_b64 else ('', img_b64)
+            img_bytes = base64.b64decode(b64data)
+            img = Image.open(io.BytesIO(img_bytes))
+            # get `filename` ext if there is one:
+            if filename:
+                _, ext = os.path.splitext(filename)
+                if not ext:
+                    ext = '.png'
+                if ext.lower() not in ['.png', '.jpg', '.jpeg']:
+                    raise ValueError(f"Unsupported file extension: {ext}. Supported extensions are: .png, .jpg, .jpeg")
+                filename = filename if filename.endswith(ext) else filename + ext
+            
+            if ext.lower() == '.png':
+                img = img.convert('RGBA')
+            else:
+                img = img.convert('RGB')
+
+            arr = np.array(img)
+            if filename:
+                img.save(filename)
+            return arr
+        return None
+
+    def set_camera(self, **kwargs) -> None:
+        """Update the viewer camera.
+
+        Accepts the same keyword arguments that `camera` returns.
+        Any provided values will overwrite the current camera state.
+        """
+        payload = {k: v for k, v in kwargs.items() if v is not None}
+        payload = as_list(payload)
+        self.socket_manager.emit_with_fallback('set_camera', {'camera': payload})
+
+    def look_at(self, position: Union[Tuple[float, float, float], np.ndarray], 
+                target: Union[Tuple[float, float, float], np.ndarray]) -> None:
+        """Position the camera and look at ``target``.
+
+        Parameters:
+            position (list, ndarray): Camera position in world coordinates.
+            target (list, ndarray): World coordinate the camera should look at.
+        """
+        position = np.asarray(position)
+        target = np.asarray(target)
+        self.set_camera(position=position, target=target)
+
     def emit_state_request(self, data):
-        """Handle state requests from the server."""
+        """Emit a state request to the server."""
         if data.get('viewer_id') != self.viewer_id:
             return
         
         event = data.get('event') # e.g. : 'request_camera_info'
         event_basename = event.replace('request_', '') # 'camera_info'
+        event_data = data.get('data', {})
         if event_basename not in self._request_events:
             raise ValueError(f"Unknown state request event: {event}")
         
         self._request_threads[event_basename].clear()
         self._request_data[event_basename] = None
-        self.socket_manager.emit('relay_state_request', {'event': event, 'viewer_id': self.viewer_id})
+        event_data = as_list(event_data)
+        self.socket_manager.emit('relay_state_request', {'event': event, 'viewer_id': self.viewer_id, 'data': event_data})
 
     def handle_state_request(self, data):
         """Handle incoming state from the frontend."""
@@ -474,12 +627,14 @@ class ViewerClient(BaseViewer):
         if data.get('viewer_id') != self.viewer_id:
             return
         camera_data = data.get('camera')
+        camera_data = as_array(camera_data)
         self.events.trigger('camera', camera_data)
 
     def handle_events_inspect(self, data):
         if data.get('viewer_id') != self.viewer_id:
             return
         inspection_data = data.get('inspection')
+        inspection_data = as_array(inspection_data)
         self.events.trigger('inspect', inspection_data)
 
     def handle_events_select_object(self, data):
@@ -488,15 +643,23 @@ class ViewerClient(BaseViewer):
         selected_object = data.get('selected_object')
         self.events.trigger('select_object', selected_object)
 
+    def handle_events_gizmo(self, data):
+        if data.get('viewer_id') != self.viewer_id:
+            return
+        gizmo_data = data.get('gizmo')
+        gizmo_data = as_array(gizmo_data)
+        self.events.trigger('gizmo', gizmo_data)
+
 class ViewerServer:
     """Standalone server without viewer functionality"""
-    def __init__(self, host: str = 'localhost', port: int = 8080, debug: bool = False):
+    def __init__(self, host: str = 'localhost', port: int = 8080, debug: bool = False, config_path: str = None):
         self.host = host
         self.port = port
         self.debug = debug
+        self.config_path = config_path
         
         from .server.app import run_standalone_server
-        run_standalone_server(host=host, port=port, debug=debug)
+        run_standalone_server(host=host, port=port, debug=debug, config_path=config_path)
 
 
 def connect(server_url: str = None, viewer_id: str = None) -> ViewerClient:
@@ -504,6 +667,13 @@ def connect(server_url: str = None, viewer_id: str = None) -> ViewerClient:
     return ViewerClient(server_url, viewer_id)
 
 
-def start_server(host: str = 'localhost', port: int = 8080, debug: bool = False):
-    """Start a standalone server without viewer functionality"""
-    ViewerServer(host, port, debug)
+def start_server(host: str = 'localhost', port: int = 8080, debug: bool = False, config_path: str = None):
+    """Start a standalone server without viewer functionality
+    
+    Args:
+        host: Server host address
+        port: Server port
+        debug: Enable debug mode
+        config_path: Path to configuration file (optional)
+    """
+    ViewerServer(host, port, debug, config_path)

@@ -2,16 +2,17 @@
 import { Buffer } from 'buffer';
 // @ts-ignore
 window.Buffer = Buffer;
-import React from 'react';
+import React, { lazy } from 'react';
 import ReactDOM from 'react-dom';
 import { marked } from 'marked';
 import { initComms } from './comms.js'; 
 import Plotly from 'plotly.js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
-import { ChromePicker } from '@uiw/react-color';
+import { evaluate } from 'mathjs';
 
-import { downloadFileFromBase64, cameraData, debounce } from './utils.js';
+import { downloadFileFromBase64, cameraData, debounce, createFpsCap } from './utils.js';
+import { setConstantsFromConfig } from './constants.js';
 import { createSceneManager } from './sceneManager.js';
 import { initTooltips } from './tooltip.js';
 import {
@@ -43,26 +44,49 @@ import {
     toggleAnimatedMeshPlayback as togglePlayback,
     renderLayersPanel as layersPanel
 } from './layersPanel.js';
+import { renderInfoBar } from './infoBar.js';
+import ConsoleWindow from './console.js';
+import WidgetPanel from './widgetPanel.js';
 
-// const marked = window.marked;
-// console.log('Socket.io initialized:', io);
 'use strict';
+console.log('PANOPTI CONFIG: ', window.panoptiConfig);
+
+function applyThemeVars(theme) {
+    if (!theme) return;
+    const root = document.documentElement;
+    for (const [k, v] of Object.entries(theme)) {
+        root.style.setProperty(`--${k}`, v);
+    }
+}
 
 const App = () => {
+    
+    // Global config:
+    const [config, setConfig] = React.useState(window.panoptiConfig);
+    const [maxFps, setMaxFps] = React.useState(60);
+    const fpsCapRef = React.useRef(null);
+
+    // Controls panel:
     const [controls, setControls] = React.useState([]);
     const [isPanelCollapsed, setIsPanelCollapsed] = React.useState(false);
+    const [panelTransitionClass, setPanelTransitionClass] = React.useState('');
+
     const [isLoading, setIsLoading] = React.useState(true);
+
+    // ThreeJS Viewer:
     const [backgroundColor, setBackgroundColor] = React.useState('#f0f0f0');
-    const [selectedObject, setSelectedObject] = React.useState(null);
     const [sceneObjects, setSceneObjects] = React.useState([]);
+    const [selectedObject, setSelectedObject] = React.useState(null);
     const [renderSettings, setRenderSettings] = React.useState({
         wireframe: false,
         flatShading: false,
         showNormals: false,
         showGrid: true,
         showAxes: true,
-        inspectMode: false
+        inspectMode: false,
+        powerPreference: 'default'
     });
+    const [gizmoEnabled, setGizmoEnabled] = React.useState(false);
     const [lightSettings, setLightSettings] = React.useState({
         ambientColor: '#ffffff',
         ambientIntensity: 0.5,
@@ -71,46 +95,147 @@ const App = () => {
     });
     const [showRenderModal, setShowRenderModal] = React.useState(false);
     const [capturedImage, setCapturedImage] = React.useState(null);
-    const [transformState, setTransformState] = React.useState({
-            position: [0, 0, 0],
-            rotation: [0, 0, 0],
-            scale: [1, 1, 1],
-            lockScale: false
-        });
-    const transformStateRef = React.useRef(transformState);
 
+    // Transformation panel:
+    const [transformState, setTransformState] = React.useState({
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1]
+    });
+    const [lockScale, setLockScale] = React.useState(false);
+    const transformStateRef = React.useRef(transformState);
+    const lockScaleRef = React.useRef(lockScale);
+
+    // Console:
     const [consoleLines, setConsoleLines] = React.useState([]);
     const [showConsole, setShowConsole] = React.useState(false);
     const [consolePos, setConsolePos] = React.useState({ x: 50, y: 50 });
+    const [consoleSize, setConsoleSize] = React.useState({ width: 550, height: 250 });
+
+    // Status alerts:
+    const [connectionStatus, setConnectionStatus] = React.useState('disconnected');
+    const [scriptStatus, setScriptStatus] = React.useState('unknown');
+    const [lastHeartbeat, setLastHeartbeat] = React.useState(Date.now() - 10000);
+    const [ping, setPing] = React.useState(null);
+    const heartbeatSentAtRef = React.useRef(null);
+    
+    const [isLayersPanelCollapsed, setIsLayersPanelCollapsed] = React.useState(false);
+    const [showInfoBar, setShowInfoBar] = React.useState(true);
+
+    // Widgets:
+    const [widgets, setWidgets] = React.useState([
+        // {
+        //     id: 'widget1',
+        //     title: 'Statistics',
+        //     icon: 'fas fa-chart-bar',
+        //     isOpen: false,
+        //     pos: { x: 100, y: 100 },
+        //     content: React.createElement('div', null, 
+        //         // React.createElement('h3', null, 'Scene Statistics'),
+        //         React.createElement('p', null, 'Total Objects: ', sceneObjects.length),
+        //         React.createElement('p', null, 'Selected Object: ', selectedObject ? selectedObject.data.id : 'None'),
+        //         React.createElement('p', null, 'Connection: ', connectionStatus)
+        //     )
+        // },
+        // {
+        //     id: 'widget2', 
+        //     title: 'Settings',
+        //     icon: 'fas fa-cog',
+        //     isOpen: false,
+        //     pos: { x: 150, y: 150 },
+        //     content: React.createElement('div', null,
+        //         // React.createElement('h3', null, 'Render Settings'),
+        //         React.createElement('p', null, 'Wireframe: ', renderSettings.wireframe),
+        //         React.createElement('p', null, 'Flat Shading: ', renderSettings.flatShading ? 'On' : 'Off'),
+        //         React.createElement('p', null, 'Show Grid: ', renderSettings.showGrid ? 'On' : 'Off'),
+        //         React.createElement('p', null, 'Show Axes: ', renderSettings.showAxes ? 'On' : 'Off')
+        //     )
+        // }
+    ]);
+
     const consoleRef = React.useRef(null);
     const dragRef = React.useRef(null);
-    
     const sceneRef = React.useRef(null);
     const rendererRef = React.useRef(null);
     const sceneManagerRef = React.useRef(null);
     const socketRef = React.useRef(null);
+
+    // Load config from injected data or fallback defaults
+    React.useEffect(() => {
+        const injectedConfig = window.panoptiConfig;
+        const cfg = injectedConfig || getFallbackDefaults();
+        
+        setConfig(cfg);
+
+        setConstantsFromConfig(cfg);
+
+        setMaxFps(cfg.viewer.renderer['max-fps']);
+
+        // Apply theme variables to CSS
+        if (cfg.viewer.theme['dark-mode']) {
+            changeBackgroundColor(cfg.viewer.theme['background-color-dark']);
+            setBackgroundColor(cfg.viewer.theme['background-color-dark']);
+        } else {
+            changeBackgroundColor(cfg.viewer.theme['background-color']);
+            setBackgroundColor(cfg.viewer.theme['background-color']);
+        }
+        applyThemeVars(cfg.viewer.theme);
+        
+        // Set initial UI state
+        setIsPanelCollapsed(cfg.viewer.ui.panel.controls.collapsed);
+        setIsLayersPanelCollapsed(cfg.viewer.ui.panel.layers.collapsed);
+        
+        // Set render settings (tools)
+        setRenderSettings(prev => ({
+            ...prev,
+            showGrid: cfg.viewer.tools.grid.enabled,
+            showAxes: cfg.viewer.tools.axes.enabled,
+            powerPreference: cfg.viewer.renderer['power-preference']
+        }));
+        
+        // Set console and infobar visibility
+        setShowConsole(cfg.viewer.ui.console.enabled);
+        setShowInfoBar(cfg.viewer.ui.infobar.enabled);
+        
+        // Update camera if SceneManager is ready
+        if (sceneManagerRef.current) {
+            sceneManagerRef.current.setCamera({
+                position: cfg.viewer.camera.position,
+                target: cfg.viewer.camera.target,
+                fov: cfg.viewer.camera.fov,
+                near: cfg.viewer.camera.near,
+                far: cfg.viewer.camera.far
+            });
+        }
+    }, []);
 
     React.useEffect(() => {
         if (selectedObject && selectedObject.data && selectedObject.data.position) {
             const newState = {
                 position: [...selectedObject.data.position],
                 rotation: [...selectedObject.data.rotation],
-                scale: [...selectedObject.data.scale],
-                lockScale: false};
+                scale: [...selectedObject.data.scale]
+            };
             setTransformState(newState);
             transformStateRef.current = newState;
         }
     }, [selectedObject]);
     
     React.useEffect(() => {
-        const socket = initComms(sceneManagerRef, { setIsLoading, setControls, setConsoleLines });
+        const socket = initComms(sceneManagerRef, { 
+            setIsLoading, 
+            setControls, 
+            setConsoleLines,
+            setConnectionStatus,
+            setPing
+        });
         socketRef.current = socket;
-        
-        // Initialize Three.js
+
         const container = sceneRef.current;
         const { clientWidth, clientHeight } = container;
         
-        // Create SceneManager
+        // Create SceneManager with config from injected data
+        const injectedConfig = window.panoptiConfig || getFallbackDefaults();
         const SceneManager = createSceneManager(
             container,
             socketRef.current,
@@ -118,7 +243,8 @@ const App = () => {
                 onSelectObject: setSelectedObject,
                 onSceneObjectsChange: updateSceneObjectsList
             },
-            backgroundColor
+            backgroundColor,
+            injectedConfig.viewer.camera,
         );
         sceneManagerRef.current = SceneManager;
         rendererRef.current = SceneManager.renderer;
@@ -133,19 +259,18 @@ const App = () => {
 
         resizeObserver.observe(container);
         
-        // Animation loop
-        const animate = () => {
-            requestAnimationFrame(animate);
-            SceneManager.update();
-        };
+        // FPS-throttled render loop:
+        fpsCapRef.current = createFpsCap( sceneManagerRef.current.update, maxFps );
+
+        function onAnimationFrame( time ) {
+            fpsCapRef.current.loop( time );
+            requestAnimationFrame( onAnimationFrame );
+        }
+        requestAnimationFrame( onAnimationFrame );
         
-        animate();
-        
-        // Cleanup
         return () => {
-            Object.values(debouncedSliderEmitRef.current).forEach(timeout => {
-                clearTimeout(timeout);
-            });
+            // Clear the debounced functions reference
+            debouncedSliderEmitRef.current = {};
             
             resizeObserver.disconnect();
             socket.disconnect();
@@ -154,7 +279,43 @@ const App = () => {
             }
         };
     }, []);
-    
+
+    // Register client_heartbeat handler
+    React.useEffect(() => {
+        if (!socketRef.current) return;
+        const handler = (data) => {
+            if (data.viewer_id && window.viewerId && data.viewer_id !== window.viewerId) return;
+            setLastHeartbeat(Date.now());
+            setScriptStatus('running');
+            if (heartbeatSentAtRef.current) {
+                const latency = Date.now() - heartbeatSentAtRef.current;
+                setPing(latency);
+            }
+        };
+        socketRef.current.on('client_heartbeat', handler);
+        return () => {
+            socketRef.current.off('client_heartbeat', handler);
+        };
+    }, []);
+
+    React.useEffect(() => {
+        function heartbeatInterval() {
+            if (socketRef.current) {
+                heartbeatSentAtRef.current = Date.now();
+                socketRef.current.emit('viewer_heartbeat', { viewer_id: window.viewerId });
+            }
+            if (lastHeartbeat) {
+                const timeSinceLastHeartbeat = Date.now() - lastHeartbeat;
+                if (timeSinceLastHeartbeat > 5000) {
+                    setScriptStatus('terminated');
+                }
+            }
+        }
+
+        const intervalId = setInterval(heartbeatInterval, 3000);
+        return () => clearInterval(intervalId);
+    }, [lastHeartbeat]);
+
     // Effect to resize the renderer when panel is collapsed/expanded
     React.useEffect(() => {
         // Force an immediate resize
@@ -162,7 +323,6 @@ const App = () => {
             sceneManagerRef.current.onWindowResize();
         }
         
-        // Add a small delay to let the CSS transition complete for a smoother experience
         const resizeTimeout = setTimeout(() => {
             if (sceneManagerRef.current) {
                 sceneManagerRef.current.onWindowResize();
@@ -180,15 +340,16 @@ const App = () => {
     
     React.useEffect(() => {
         if (sceneManagerRef.current) {
-            sceneManagerRef.current.applyLightSettings(lightSettings);
-        }
-    }, [lightSettings]);
-    
-    React.useEffect(() => {
-        if (sceneManagerRef.current) {
             updateSceneObjectsList();
         }
     }, [sceneManagerRef.current]);
+
+    // Recreate FPS cap when maxFps changes
+    React.useEffect(() => {
+        if (sceneManagerRef.current) {
+            fpsCapRef.current = createFpsCap(sceneManagerRef.current.update, maxFps);
+        }
+    }, [maxFps]);
 
     React.useEffect(() => {
         if (showConsole && consoleRef.current) {
@@ -202,7 +363,6 @@ const App = () => {
                 if (c.type === 'plotly') {
                     const el = document.getElementById(`plotly-${c.id}`);
                     if (el) {
-                        console.log('Rendering Plotly:', el, c.spec);
                         Plotly.react(el, c.spec.data || [], c.spec.layout || {}, c.spec.config || {});
                     }
                 }
@@ -232,20 +392,31 @@ const App = () => {
     const handleColorChange = (id, value) =>
         uiHandleColorChange(socketRef, id, value);
     
-    const togglePanelCollapse = () => {
-        setIsPanelCollapsed(!isPanelCollapsed);
+    const handlePanelCollapseToggle = () => {
+        if (!isPanelCollapsed) {
+            setPanelTransitionClass('panel-collapsing');
+            setIsPanelCollapsed(true);
+            setTimeout(() => setPanelTransitionClass(''), 0);
+        } else {
+            setPanelTransitionClass('panel-expanding');
+            setIsPanelCollapsed(false);
+            // Remove class after expand transition (300ms)
+            setTimeout(() => setPanelTransitionClass(''), 300);
+        }
     };
     
     const changeBackgroundColor = (color) =>
         bgColor(sceneManagerRef, setBackgroundColor, color);
 
-    const toggleBackgroundColor = () =>
-        changeBackgroundColor(backgroundColor === '#2d3142' ? '#f0f0f0' : '#2d3142');
+    const toggleBackgroundColor = () => {
+        const isDark = backgroundColor === config.viewer.theme['background-color-dark'];
+        const newColor = isDark ? config.viewer.theme['background-color'] : config.viewer.theme['background-color-dark'];
+        changeBackgroundColor(newColor);
+    };
 
     const resetCamera = () => resetCam(sceneManagerRef);
     
     const refreshState = () => {
-        
         // Clear existing objects and controls
         if (sceneManagerRef.current) {
             sceneManagerRef.current.clearAllObjects();
@@ -255,10 +426,14 @@ const App = () => {
         socketRef.current.emit('request_state', { viewer_id: window.viewerId });
     };
 
+    const restartConsoleMessage = { segments: [ { text: "-------------------------------\n[Panopti] Restarting script...\n-------------------------------\n", color: "yellow" } ] };
     const restartScript = () => {
+        setScriptStatus('restarting');
+        setConsoleLines(prev => [...prev, restartConsoleMessage]);
         const payload = {};
         if (window.viewerId) payload.viewer_id = window.viewerId;
         socketRef.current.emit('restart_script', payload);
+        refreshState();
     };
 
     const applyTransforms = (updates) => {
@@ -273,7 +448,7 @@ const App = () => {
         let num;
         try {
             if (typeof value === 'string' && value.trim() !== '') {
-                num = math.evaluate(value);
+                num = evaluate(value);
             }
         } catch (err) {
             num = NaN;
@@ -282,10 +457,9 @@ const App = () => {
             num = transformState[type][index];
             console.warn(`Invalid input for ${type}[${index}]:`, value, 'Using previous value:', num);
         }
-
         let currentState = transformStateRef.current;
         let arr = [...currentState[type]];
-        if (type === 'scale' && transformState.lockScale) {
+        if (type === 'scale' && lockScaleRef.current) {
             const ratio = num / arr[index];
             arr = arr.map(v => v * ratio);
         } else {
@@ -303,7 +477,7 @@ const App = () => {
         let arr = [...currentState[type]];
         const prevVal = arr[index];
         const val = prevVal + dir * step;
-        if (type === 'scale' && transformState.lockScale) {
+        if (type === 'scale' && lockScaleRef.current) {
             const ratio = val / prevVal;
             arr = arr.map(v => v * ratio);
         } else {
@@ -316,7 +490,10 @@ const App = () => {
     };
 
     const toggleScaleLock = () => {
-        setTransformState(prev => ({ ...prev, lockScale: !prev.lockScale }));
+        setLockScale(prev => {
+            lockScaleRef.current = !prev;
+            return !prev;
+        });
     };
 
     const resetTransform = () => {
@@ -329,30 +506,43 @@ const App = () => {
 
     const toggleConsole = () => setShowConsole(prev => !prev);
 
-    const handleConsoleMouseDown = (e) => {
-        dragRef.current = { x: e.clientX, y: e.clientY, start: consolePos };
-        document.addEventListener('mousemove', handleConsoleMouseMove);
-        document.addEventListener('mouseup', handleConsoleMouseUp);
+    const toggleWidget = (widgetId) => {
+        setWidgets(prev => prev.map(widget => 
+            widget.id === widgetId 
+                ? { ...widget, isOpen: !widget.isOpen }
+                : widget
+        ));
     };
 
-    const handleConsoleMouseMove = (e) => {
-        if (!dragRef.current) return;
-        const dx = e.clientX - dragRef.current.x;
-        const dy = e.clientY - dragRef.current.y;
-        setConsolePos({ x: dragRef.current.start.x + dx, y: dragRef.current.start.y + dy });
+    const minimizeWidget = (widgetId) => {
+        setWidgets(prev => prev.map(widget => 
+            widget.id === widgetId 
+                ? { ...widget, isOpen: false }
+                : widget
+        ));
     };
 
-    const handleConsoleMouseUp = () => {
-        dragRef.current = null;
-        document.removeEventListener('mousemove', handleConsoleMouseMove);
-        document.removeEventListener('mouseup', handleConsoleMouseUp);
+    const updateWidgetPosition = (widgetId, newPos) => {
+        setWidgets(prev => prev.map(widget => 
+            widget.id === widgetId 
+                ? { ...widget, pos: newPos }
+                : widget
+        ));
     };
     
-    const toggleRenderSetting = (setting) =>
-        toggleSetting(sceneManagerRef, setRenderSettings, setting);
+    const toggleRenderSetting = (setting, value) =>
+        toggleSetting(sceneManagerRef, setRenderSettings, setting, value);
 
     const updateLightSetting = (setting, value) =>
         updateLight(sceneManagerRef, setLightSettings, setting, value);
+    
+    const toggleGizmo = () => {
+        const newEnabled = !gizmoEnabled;
+        setGizmoEnabled(newEnabled);
+        if (sceneManagerRef.current) {
+            sceneManagerRef.current.setGizmoEnabled(newEnabled);
+        }
+    };
     
     const exportObject = exportObj;
 
@@ -396,16 +586,28 @@ const App = () => {
             refreshState,
             restartScript,
             toggleConsole,
-            isDark: backgroundColor === '#2d3142',
+            isDark: backgroundColor === config.viewer.theme['background-color-dark'],
         });
     
     // Create Render Toolbar
     const renderRenderToolbar = () =>
-        renderToolbar(renderSettings, toggleRenderSetting, captureCurrentView, renderToClipboard);
+        renderToolbar(renderSettings, toggleRenderSetting, captureCurrentView, renderToClipboard, gizmoEnabled, toggleGizmo);
     
     // Create Lighting Toolbar
     const renderLightingToolbar = () =>
         lightingToolbar(lightSettings, updateLightSetting);
+
+    // Render Layers Panel
+    const renderLayersPanel = () =>
+        layersPanel(
+            sceneObjects,
+            selectedObject,
+            setSelectedObject,
+            sceneManagerRef,
+            updateSceneObjectsList,
+            isLayersPanelCollapsed,
+            () => setIsLayersPanelCollapsed((prev) => !prev)
+        );
 
     const renderTransformPanel = () => {
         if (!selectedObject || !selectedObject.data.position) return null;
@@ -491,8 +693,8 @@ const App = () => {
                 { className: 'transform-lock-reset' },
                 React.createElement(
                     'button',
-                    { className: 'lock-btn tooltip', onClick: toggleScaleLock, 'data-tooltip': transformState.lockScale ? 'Unlock aspect ratio' : 'Lock aspect ratio' },
-                    React.createElement('i', { className: transformState.lockScale ? 'fas fa-lock' : 'fas fa-lock-open' })
+                    { className: 'lock-btn tooltip', onClick: toggleScaleLock, 'data-tooltip': lockScale ? 'Unlock aspect ratio' : 'Lock aspect ratio' },
+                    React.createElement('i', { className: lockScale ? 'fas fa-lock' : 'fas fa-lock-open' })
                 ),
                 React.createElement(
                     'button',
@@ -513,93 +715,10 @@ const App = () => {
             React.createElement('div', { className: 'spinner' })
         );
     };
-    
-    // Info Bar
-    const renderInfoBar = () => {
-        if (!selectedObject) {
-            return React.createElement(
-                'div',
-                { className: 'info-bar' },
-                React.createElement('span', null, 'No object selected. Click on an object to view details.')
-            );
-        }
-        
-        const { type, data } = selectedObject;
-        
-        let details = [];
-        
-        // Add common details
-        details.push(`Name: ${data.id}`);
-        details.push(`Type: ${type}`);
-        
-        // Add type-specific details
-        if (type === 'mesh') {
-            const vertexCount = data.vertices ? data.vertices.length : 0;
-            const faceCount = data.faces ? Math.floor(data.faces.length / 3) : 0;
-            details.push(`Vertices: ${vertexCount}`);
-            details.push(`Faces: ${faceCount}`);
-        } else if (type === 'animated_mesh') {
-            const frameCount = data.vertices ? data.vertices.length : 0;
-            const vertexCount = data.vertices && data.vertices[0] ? data.vertices[0].length : 0;
-            const faceCount = data.faces ? Math.floor(data.faces.length / 3) : 0;
-            details.push(`Frames: ${frameCount}`);
-            details.push(`Vertices: ${vertexCount}`);
-            details.push(`Faces: ${faceCount}`);
-            details.push(`Framerate: ${data.framerate} fps`);
-            details.push(`Playing: ${data.is_playing ? 'Yes' : 'No'}`);
-        } else if (type === 'points') {
-            const pointCount = data.points ? data.points.length : 0;
-            details.push(`Points: ${pointCount}`);
-        } else if (type === 'arrows') {
-            const arrowCount = data.starts ? data.starts.length : 0;
-            details.push(`Arrows: ${arrowCount}`);
-        }
-        
-        return React.createElement(
-            'div',
-            { className: 'info-bar' },
-            details.map((detail, index) => 
-                React.createElement('span', { key: index, className: 'info-item' }, detail)
-            )
-        );
-    };
-    
-    // Render Layers Panel
-    const renderLayersPanel = () =>
-        layersPanel(sceneObjects, selectedObject, setSelectedObject, sceneManagerRef, updateSceneObjectsList);
 
-    const renderConsoleWindow = () => {
-        if (!showConsole) return null;
-        return React.createElement(
-            'div',
-            {
-                className: 'console-window',
-                style: { 
-                    left: consolePos.x,
-                    top: consolePos.y,
-                    resize: 'both',
-                    overflow: 'auto',
-                    width: '300px',
-                    height: '200px'
-                }
-            },
-            React.createElement(
-                'div',
-                { className: 'console-header', onMouseDown: handleConsoleMouseDown },
-                React.createElement('span', null, 'Console'),
-                React.createElement(
-                    'button',
-                    { className: 'console-close', onClick: toggleConsole },
-                    '×'
-                )
-            ),
-            React.createElement('pre', { className: 'console-content', ref: consoleRef }, consoleLines.join(''))
-        );
-    };
-    
     return React.createElement(
         'div',
-        { className: "viewer-container" },
+        { className: "viewer-container", style: { position: 'relative' } },
         React.createElement(
             'div',
             {
@@ -610,31 +729,57 @@ const App = () => {
             renderRenderToolbar(),
             // renderLightingToolbar(),
             renderTransformPanel(),
-            renderInfoBar(),
+            showInfoBar && renderInfoBar(selectedObject, connectionStatus, scriptStatus, ping, widgets, toggleWidget),
             renderLayersPanel(),
-            renderConsoleWindow()
+            React.createElement(ConsoleWindow, {
+                consoleLines,
+                setConsoleLines,
+                consolePos,
+                setConsolePos,
+                consoleSize,
+                setConsoleSize,
+                toggleConsole,
+                showConsole,
+                consoleRef,
+            }),
+            // Render widget panels
+            widgets.map(widget => 
+                React.createElement(WidgetPanel, {
+                    key: widget.id,
+                    showWidget: widget.isOpen,
+                    widgetId: widget.id,
+                    widgetTitle: widget.title,
+                    widgetContent: widget.content,
+                    widgetPos: widget.pos,
+                    setWidgetPos: (newPos) => updateWidgetPosition(widget.id, newPos),
+                    onMinimize: minimizeWidget,
+                    dragRef
+                })
+            )
         ),
-        // React.createElement(
-        //     'button',
-        //     {
-        //         className: 'toggle-panel',
-        //         onClick: togglePanelCollapse,
-        //         title: isPanelCollapsed ? 'Show Panel' : 'Hide Panel',
-        //         style: { left: isPanelCollapsed ? '16px' : '336px' }
-        //     },
-        //     React.createElement('i', { 
-        //         className: isPanelCollapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left' 
-        //     })
-        // ),
         React.createElement(
             'div',
             { 
-                className: `ui-panel ${isPanelCollapsed ? 'panel-collapsed' : ''}` 
+                className: `ui-panel${isPanelCollapsed ? ' panel-collapsed' : ''}${panelTransitionClass ? ' ' + panelTransitionClass : ''}`
             },
             React.createElement(
                 'div',
                 { className: 'ui-panel-header' },
-                React.createElement('h2', null, "")
+                React.createElement(
+                    'div',
+                    { className: 'ui-panel-header-content' },
+                    React.createElement(
+                        'button',
+                        {
+                            className: 'collapse-ui-panel-btn',
+                            onClick: (e) => { e.stopPropagation(); handlePanelCollapseToggle(); },
+                            style: { transform: isPanelCollapsed ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }
+                        },
+                        React.createElement('i', { className: 'fas fa-chevron-right' })
+                    ),
+                    React.createElement('h2', null, config.title || "Panopti"),
+                    config.subtitle && React.createElement('div', { className: 'ui-panel-subtitle' }, config.subtitle)
+                )
             ),
             React.createElement(
                 'div',
@@ -643,6 +788,14 @@ const App = () => {
                     ? controls.map(renderControl)
                     : React.createElement('p', null, "No controls available.")
             )
+        ),
+        isPanelCollapsed && React.createElement(
+            'button',
+            {
+                className: 'floating-ui-panel-caret',
+                onClick: handlePanelCollapseToggle
+            },
+            React.createElement('i', { className: 'fas fa-chevron-left' })
         ),
         // Render Modal
         showRenderModal && React.createElement(
@@ -681,7 +834,7 @@ const App = () => {
                     )
                 )
             )
-        )
+        ),
     );
 };
 
@@ -692,3 +845,5 @@ ReactDOM.render(
 
 initTooltips();
 
+// import hack to avoid dev server error
+const ChromePicker = React.lazy(() => import('@uiw/react-color').then(module => ({ default: module.ChromePicker })));

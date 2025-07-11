@@ -12,6 +12,7 @@ faces = np.ascontiguousarray(faces, dtype=np.int32)
 normals = np.ascontiguousarray(mesh.vertex_normals, dtype=np.float32)
 verts = verts - verts.mean(axis=0, keepdims=True)  # Center the mesh
 
+### Add mesh with vertex colors
 vertex_colors = to_rgb(verts[:, 1], cmap='viridis')
 viewer.add_mesh(
     vertices=verts,
@@ -20,26 +21,26 @@ viewer.add_mesh(
     vertex_colors=vertex_colors,
 )
 
-### Point cloud
+### Add Point cloud -- reuse vertex_colors
 points = verts.copy()
 points[:,0] += 2
-point_colors = to_rgb(points[:, 1], cmap='viridis')
 viewer.add_points(
     points=points,
     name="StatuePoints",
-    colors=point_colors,
+    colors=vertex_colors,
     size=0.015,
 )
 
-# ### Arrows
+### Add arrows pointing to another point cloud
 points2 = points + (0.8, 0.8, -1.5)
 random_subset = np.random.choice(points.shape[0], size=points.shape[0] // 128, replace=False)
 viewer.add_points(
     points=points2[random_subset],
     name="PointsSubset",
-    colors=point_colors[random_subset],
+    colors=vertex_colors[random_subset],
     size=0.05,
 )
+
 viewer.add_arrows(
     starts=points2[random_subset],
     ends=points[random_subset],
@@ -72,7 +73,7 @@ def whacky_transform(vertices, normals, t):
 # bake whacky animation:
 verts_animation = []
 for t in np.linspace(0, 1, 50):
-    temp_verts = whacky_transform(verts.copy(), normals, t) - (2.0, 0.0, 0.0)
+    temp_verts = whacky_transform(verts.copy(), normals, t)
     verts_animation.append(temp_verts)
 verts_animation = np.stack(verts_animation)
 # boomerang the animation:
@@ -83,6 +84,7 @@ viewer.add_animated_mesh(
     name="WhackyAnimation",
     framerate=24,
     vertex_colors=vertex_colors,
+    position=(-2, 0, 0) # move to the left
 )
 
 viewer.hold()

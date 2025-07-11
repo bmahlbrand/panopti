@@ -1,0 +1,51 @@
+# Panopti configuration file
+
+title = "Panopti"
+subtitle = ""
+
+[viewer.tools]
+grid.enabled = true
+axes.enabled = true
+
+[viewer.renderer]
+max-fps = 60
+power-preference = "default"
+
+# Custom lights
+light-key     = { type = "directional", position = [10, 15, 10], target = [0, 0, 0], color = "#ffffff", intensity = 2.3, castShadow = false }
+light-fill    = { type = "directional", position = [-20, 5, -10], target = [0, 0, 0], color = "#ffffff", intensity = 2.0, castShadow = false }
+light-ambient = { type = "ambient", color = "#ffffff", intensity = 1.0 }
+
+[viewer.theme]
+primary-color = "#4361ee"
+primary-hover = "#3a56d4"
+secondary-color = "#3f37c9"
+background-color = "#f0f0f0"
+background-color-dark = "#2d3142"
+panel-bg = "#ffffff"
+text-color = "#333333"
+text-secondary = "#666666"
+border-color = "#e9ecef"
+success-color = "#38b000"
+success-hover = "#2d9900"
+dark-mode = false
+
+[viewer.camera]
+position = [5, 5, 5]
+target = [0, 0, 0]
+fov = 50
+near = 0.1
+far = 1000
+projection = "perspective"
+
+[viewer.ui]
+panel.controls.collapsed = false
+panel.layers.collapsed = false
+console.enabled = false
+infobar.enabled = true
+
+# Viewer settings (low-level, see constants.js):
+[viewer.debounce]
+slider = 25
+transform = 25
+camera = 25

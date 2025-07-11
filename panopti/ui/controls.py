@@ -1,5 +1,7 @@
 # panopti/ui/controls.py
 from typing import Callable, Dict, Any, Optional, List, Tuple
+import numpy as np
+from ..utils.parse import as_array, as_list
 
 class UIControl:
     def __init__(self, viewer, name: str):
@@ -35,12 +37,12 @@ class Slider(UIControl):
         self.step = step
         self.initial = initial
         self.description = description
-        self.current_value = initial  # Track current value
+        self.current_value = initial
     
     def handle_event(self, value: float) -> Optional[str]:
-        self.current_value = value  # Update current value
+        self.current_value = float(value)
         if self.callback:
-            return self.callback(self.viewer, value)
+            return self.callback(self.viewer, self.current_value)
         return None
     
     def value(self) -> float:
@@ -52,14 +54,13 @@ class Slider(UIControl):
             "id": self.name,
             "name": self.name,
             "type": "slider",
-            "min": self.min,
-            "max": self.max,
-            "step": self.step,
-            "initial": self.initial,
+            "min": float(self.min),
+            "max": float(self.max),
+            "step": float(self.step),
+            "initial": float(self.initial),
             "description": self.description
         }
         
-        # Add viewer_id if the viewer has it (client mode)
         if hasattr(self.viewer, 'viewer_id'):
             data['viewer_id'] = self.viewer.viewer_id
             
@@ -85,7 +86,6 @@ class Button(UIControl):
             "type": "button"
         }
         
-        # Add viewer_id if the viewer has it (client mode)
         if hasattr(self.viewer, 'viewer_id'):
             data['viewer_id'] = self.viewer.viewer_id
             
@@ -118,7 +118,6 @@ class Label(UIControl):
             "text": self.text
         }
         
-        # Add viewer_id if the viewer has it (client mode)
         if hasattr(self.viewer, 'viewer_id'):
             data['viewer_id'] = self.viewer.viewer_id
 
@@ -136,9 +135,9 @@ class Checkbox(UIControl):
         self.checked = initial
     
     def handle_event(self, value: bool) -> Optional[str]:
-        self.checked = value
+        self.checked = bool(value)
         if self.callback:
-            return self.callback(self.viewer, value)
+            return self.callback(self.viewer, self.checked)
         return None
     
     def value(self) -> bool:
@@ -150,11 +149,10 @@ class Checkbox(UIControl):
             "id": self.name,
             "name": self.name,
             "type": "checkbox",
-            "initial": self.initial,
+            "initial": bool(self.initial),
             "description": self.description
         }
         
-        # Add viewer_id if the viewer has it (client mode)
         if hasattr(self.viewer, 'viewer_id'):
             data['viewer_id'] = self.viewer.viewer_id
             
@@ -173,9 +171,9 @@ class Dropdown(UIControl):
         self.current_value = self.initial
     
     def handle_event(self, value: str) -> Optional[str]:
-        self.current_value = value 
+        self.current_value = str(value) 
         if self.callback:
-            return self.callback(self.viewer, value)
+            return self.callback(self.viewer, self.current_value)
         return None
     
     def value(self) -> str:
@@ -188,7 +186,7 @@ class Dropdown(UIControl):
             "name": self.name,
             "type": "dropdown",
             "options": self.options,
-            "initial": self.initial,
+            "initial": str(self.initial),
             "description": self.description
         }
         
@@ -238,16 +236,16 @@ class ColorPicker(UIControl):
         super().__init__(viewer, name)
 
         self.callback = callback
-        self.initial = initial
-        self.current_value = initial
+        self.initial = np.asarray(initial, dtype=np.float32)
+        self.current_value = np.asarray(initial, dtype=np.float32)
 
     def handle_event(self, value: Tuple[float, float, float, float]) -> Optional[str]:
-        self.current_value = value
+        self.current_value = np.asarray(value, dtype=np.float32)
         if self.callback:
-            return self.callback(self.viewer, value)
+            return self.callback(self.viewer, self.current_value)
         return None
 
-    def value(self) -> Tuple[float, float, float, float]:
+    def value(self) -> np.ndarray:
         return self.current_value
 
     def to_dict(self) -> Dict[str, Any]:

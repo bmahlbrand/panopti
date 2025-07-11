@@ -1,36 +1,43 @@
-/* global math */
 import React from 'react';
 import convert from 'color-convert';
 import { marked } from 'marked';
 import { Chrome } from '@uiw/react-color';
+import DOMPurify from 'dompurify';
+import { evaluate } from 'mathjs';
 
 import { colorListToDict, colorDictToList, pythonRGBAToJS } from './utils.js';
 import { debounce, throttle } from './utils.js';
 import * as CONSTANTS from './constants.js';
 
+function escapeCSS(str) {
+    return str.replace(/[!"#$%&'()*+,.\/:;<=>?@\[\\\]^`{|}~\s]/g, '\\$&');
+}
+
 export function handleSliderChange(controls, socketRef, debouncedRef, controlId, value) {
     const control = controls.find(c => c.id === controlId);
     if (control) {
-        const valueElem = document.querySelector(`#slider-value-${controlId}`);
+        const valueElem = document.querySelector(`#slider-value-${escapeCSS(controlId)}`);
         if (valueElem) valueElem.value = value;
-        const rangeElem = document.querySelector(`#slider-range-${controlId}`);
+        const rangeElem = document.querySelector(`#slider-range-${escapeCSS(controlId)}`);
         if (rangeElem && rangeElem.value !== String(value)) rangeElem.value = value;
     }
-    if (debouncedRef.current[controlId]) {
-        clearTimeout(debouncedRef.current[controlId]);
+
+    // Create or reuse throttled function for this control
+    if (!debouncedRef.current[controlId]) {
+        debouncedRef.current[controlId] = throttle((currentValue) => {
+            const eventData = {
+                eventType: 'sliderChange', 
+                controlId: controlId,
+                value: parseFloat(currentValue)
+            };
+            if (window.viewerId) {
+                eventData.viewer_id = window.viewerId;
+            }
+            socketRef.current.emit('ui_event', eventData);
+        }, CONSTANTS.DEBOUNCE_SLIDER);
     }
-    debouncedRef.current[controlId] = setTimeout(() => {
-        const eventData = {
-            eventType: 'sliderChange',
-            controlId: controlId,
-            value: parseFloat(value)
-        };
-        if (window.viewerId) {
-            eventData.viewer_id = window.viewerId;
-        }
-        socketRef.current.emit('ui_event', eventData);
-        delete debouncedRef.current[controlId];
-    }, CONSTANTS.DEBOUNCE_SLIDER);
+
+    debouncedRef.current[controlId](value);
 }
 
 export function handleSliderInputCommit(controls, socketRef, debouncedRef, controlId, value) {
@@ -39,13 +46,13 @@ export function handleSliderInputCommit(controls, socketRef, debouncedRef, contr
     let num;
     try {
         if (typeof value === 'string' && value.trim() !== '') {
-            num = math.evaluate(value);
+            num = evaluate(value);
         }
     } catch (err) {
         num = NaN;
     }
     if (typeof num !== 'number' || isNaN(num)) {
-        const rangeElem = document.querySelector(`#slider-range-${controlId}`);
+        const rangeElem = document.querySelector(`#slider-range-${escapeCSS(controlId)}`);
         if (rangeElem) num = parseFloat(rangeElem.value);
         else num = control.initial;
     }
@@ -58,7 +65,7 @@ export function handleSliderInputCommit(controls, socketRef, debouncedRef, contr
 export function handleSliderArrow(controls, socketRef, debouncedRef, controlId, direction) {
     const control = controls.find(c => c.id === controlId);
     if (!control) return;
-    const rangeElem = document.querySelector(`#slider-range-${controlId}`);
+    const rangeElem = document.querySelector(`#slider-range-${escapeCSS(controlId)}`);
     let current = rangeElem ? parseFloat(rangeElem.value) : control.initial;
     const step = control.step || 1;
     let next = current + direction * step;
@@ -73,6 +80,7 @@ export function handleButtonClick(socketRef, controlId) {
         eventData.viewer_id = window.viewerId;
     }
     socketRef.current.emit('ui_event', eventData);
+    console.log('button clicked', controlId);
 }
 
 export function handleCheckboxChange(socketRef, controlId, checked) {
@@ -109,17 +117,21 @@ export function ColorPickerControl({ control, handlers }) {
     const [rgba, setRgba] = React.useState(initialColorRGBA);
     const pickerRef = React.useRef(null);
 
-    // Debounced function that propagates color changes to the server
-    const debouncedColorChange = React.useMemo(() => throttle((rgba) => {
+    // Store the throttled function in a ref, only recreate if control.id changes
+    const debouncedColorChangeRef = React.useRef();
+    React.useEffect(() => {
+        debouncedColorChangeRef.current = throttle((rgba) => {
             handlers.handleColorChange(control.id, [rgba.r / 255, rgba.g / 255, rgba.b / 255, rgba.a]);
-        }, 50), [handlers, control.id]);
+        }, CONSTANTS.DEBOUNCE_SLIDER);
+    }, [control.id]);
 
     const handleChangeComplete = (c) => {
-        console.log('Color changed to', c)
         setHsva(c.hsva);
         const rgba = c.rgba;
         setRgba(rgba);
-        debouncedColorChange(rgba);
+        if (debouncedColorChangeRef.current) {
+            debouncedColorChangeRef.current(rgba);
+        }
     }
 
     React.useEffect(() => {
@@ -241,7 +253,7 @@ export function renderControl(control, handlers) {
                 { className: 'control-group', key: control.id },
                 React.createElement(
                     'div',
-                    { className: 'label-container', dangerouslySetInnerHTML: { __html: marked.parse(control.text) } }
+                    { className: 'label-container', dangerouslySetInnerHTML: { __html: DOMPurify.sanitize(marked.parse(control.text)) } }
                 )
             );
         case 'checkbox':

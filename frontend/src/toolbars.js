@@ -13,11 +13,15 @@ export function resetCamera(sceneManagerRef) {
     }
 }
 
-export function toggleRenderSetting(sceneManagerRef, setRenderSettings, setting) {
+export function toggleRenderSetting(sceneManagerRef, setRenderSettings, setting, value) {
     setRenderSettings(prev => {
         let newValue;
         if (setting === 'wireframe') {
-            newValue = (prev[setting] + 1) % 3;
+            if (typeof value === 'number') {
+                newValue = value;
+            } else {
+                newValue = (prev[setting] + 1) % 4;
+            }
         } else {
             newValue = !prev[setting];
         }
@@ -120,46 +124,65 @@ export function renderSceneToolbar({ resetCamera, toggleBackgroundColor, refresh
     );
 }
 
-export function renderRenderToolbar(renderSettings, toggleRenderSetting, captureCurrentView, renderToClipboard) {
+export function renderRenderToolbar(renderSettings, toggleRenderSetting, captureCurrentView, renderToClipboard, gizmoEnabled = false, toggleGizmo = null) {
     return React.createElement(
         'div',
         { className: 'render-toolbar' },
         React.createElement(
             'button',
             {
-                className: `toolbar-button tooltip ${renderSettings.wireframe > 0 ? 'active' : ''}`,
-                'data-tooltip': renderSettings.wireframe === 0 ? 'Normal Mode' :
-                       renderSettings.wireframe === 1 ? 'Wireframe with Geometry' : 'Pure Wireframe',
-                onClick: () => toggleRenderSetting('wireframe')
-            },
-            React.createElement('i', {
-                className: renderSettings.wireframe === 0 ? 'fas fa-cube' :
-                          renderSettings.wireframe === 1 ? 'fas fa-layer-group' : 'fas fa-vector-square'
-            })
-        ),
-        React.createElement(
-            'button',
-            {
                 className: `toolbar-button tooltip ${renderSettings.flatShading ? 'active' : ''}`,
-                'data-tooltip': 'Toggle Flat/Smooth Shading',
+                'data-tooltip': renderSettings.flatShading ?  'Shading mode: Flat' : 'Shading mode: Smooth',
                 onClick: () => toggleRenderSetting('flatShading')
             },
-            React.createElement('i', { className: 'fas fa-square' })
+            React.createElement(
+                'span',
+                {
+                    className: `material-symbols-outlined ${renderSettings.flatShading ? 'ms-outlined' : 'ms-filled'}`,
+                },
+                'ev_shadow'
+            )
         ),
         React.createElement(
             'button',
             {
                 className: `toolbar-button tooltip ${renderSettings.showNormals ? 'active' : ''}`,
-                'data-tooltip': 'Toggle Normals',
+                'data-tooltip': renderSettings.showNormals ? 'Hide Normals' : 'Show Normals',
                 onClick: () => toggleRenderSetting('showNormals')
             },
-            React.createElement('i', { className: 'fas fa-arrows-alt' })
+            React.createElement(
+                'span',
+                { className: `material-symbols-outlined`, style: { transform: 'rotate(-90deg)' } },
+                'start'
+            )
         ),
+        React.createElement('div', { className: 'toolbar-separator' }),
+        React.createElement(
+            'div',
+            { className: 'segmented-control wireframe-segmented' },
+            [
+                { mode: 1, icon: 'fas fa-cube', tooltip: 'Render mode: Surface' },
+                { mode: 2, icon: 'fa-solid fa-border-top-left', tooltip: 'Render mode: Surface + Wireframe' },
+                { mode: 3, icon: 'fas fa-vector-square', tooltip: 'Render mode: Wireframe Only' }
+            ].map(opt =>
+                React.createElement(
+                    'button',
+                    {
+                        key: opt.mode,
+                        className: `toolbar-button segmented${renderSettings.wireframe === opt.mode ? ' active' : ''} tooltip`,
+                        'data-tooltip': opt.tooltip,
+                        onClick: () => toggleRenderSetting('wireframe', renderSettings.wireframe === opt.mode ? 0 : opt.mode)
+                    },
+                    React.createElement('i', { className: opt.icon })
+                )
+            )
+        ),
+        React.createElement('div', { className: 'toolbar-separator' }),
         React.createElement(
             'button',
             {
                 className: `toolbar-button tooltip ${renderSettings.showGrid ? 'active' : ''}`,
-                'data-tooltip': 'Toggle Grid',
+                'data-tooltip': renderSettings.showGrid ? 'Disable Grid' : 'Enable Grid',
                 onClick: () => toggleRenderSetting('showGrid')
             },
             React.createElement('i', { className: 'fas fa-border-all' })
@@ -168,10 +191,10 @@ export function renderRenderToolbar(renderSettings, toggleRenderSetting, capture
             'button',
             {
                 className: `toolbar-button tooltip ${renderSettings.showAxes ? 'active' : ''}`,
-                'data-tooltip': 'Toggle Axes',
+                'data-tooltip': renderSettings.showAxes ? 'Disable Axes' : 'Enable Axes', 
                 onClick: () => toggleRenderSetting('showAxes')
             },
-            React.createElement('i', { className: 'fas fa-compass' })
+            React.createElement('i', { className: 'mdi mdi-axis-arrow', style: { fontSize: '20px' } })
         ),
         React.createElement(
             'button',
@@ -182,9 +205,20 @@ export function renderRenderToolbar(renderSettings, toggleRenderSetting, capture
             },
             React.createElement('i', { className: 'fas fa-search' })
         ),
+        // Gizmo toggle button
+        toggleGizmo && React.createElement(
+            'button',
+            {
+                className: `toolbar-button tooltip ${gizmoEnabled ? 'active' : ''}`,
+                'data-tooltip': gizmoEnabled ? 'Disable Transform Gizmo' : 'Enable Transform Gizmo (E/R/T for translate/rotate/scale)',
+                onClick: toggleGizmo
+            },
+            React.createElement('i', { className: 'fas fa-arrows-alt' })
+        ),
+        React.createElement('div', { className: 'toolbar-separator' }),
         React.createElement(
             'button',
-            { className: 'toolbar-button tooltip', 'data-tooltip': 'Render View (with Save Dialog)', onClick: captureCurrentView },
+            { className: 'toolbar-button tooltip', 'data-tooltip': 'Render View', onClick: captureCurrentView },
             React.createElement('i', { className: 'fas fa-camera' })
         ),
         React.createElement(

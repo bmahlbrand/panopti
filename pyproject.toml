@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "panopti"
+version = "0.2.0"
+description = "Panopti: Interactive 3D visualization in Python."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+authors = [
+    {name = "Arman Maesumi", email = "arman.maesumi@gmail.com"}
+]
+keywords = ["3D", "visualization", "geometry", "interactive", "web"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "numpy",
+    "requests",
+    "flask",
+    "flask-socketio",
+    "eventlet",
+    "python-socketio[client]",
+    "tomli",
+    "msgpack",
+    "trimesh",
+]
+
+[project.urls]
+Homepage = "https://github.com/armanmaesumi/panopti"
+Repository = "https://github.com/armanmaesumi/panopti"
+Documentation = "https://armanmaesumi.github.io/panopti/"
+
+[tool.setuptools.packages.find]
+include = ["panopti*"]
+
+[tool.setuptools.package-data]
+panopti = [
+    # vite bundle:
+    "server/static/dist/**/*",
+    "server/static/dist/.vite/**/*",
+    # HTML + any assets referenced inside templates
+    "server/static/templates/**/*",
+    # default configuration toml:
+    "default_config.toml",
+]

@@ -3,11 +3,13 @@ from typing import Dict, Any
 import socketio
 import json
 import requests
+from panopti.utils.parse import as_list, encode_msgpack
+from socketio.exceptions import ConnectionError  # Added for better error handling
 
 class SocketManager:
     """Abstraction over Socket.IO with HTTP fallback for large payloads."""
 
-    MAX_BYTES = 1_000_000
+    MAX_BYTES = 250_000
 
     def __init__(self, viewer):
         self.viewer = viewer
@@ -39,8 +41,22 @@ class SocketManager:
                 payload["viewer_id"] = self.viewer.viewer_id
             requests.post(f"{url}/http_event", json=payload)
         except Exception as exc:
-            print(f"HTTP emit failed: {exc}, falling back to socket")
             self.emit(event, data)
+
+    def _emit_http_msgpack(self, event: str, data: Dict[str, Any]) -> None:
+        url = self.server_url
+        if not url:
+            self.emit(event, as_list(data))
+            return
+        try:
+            payload = {"event": event, "data": data}
+            if hasattr(self.viewer, "viewer_id"):
+                payload["viewer_id"] = self.viewer.viewer_id
+            packed = encode_msgpack(payload)
+            headers = {"Content-Type": "application/msgpack"}
+            requests.post(f"{url}/http_event", data=packed, headers=headers)
+        except Exception as exc:
+            self.emit(event, as_list(data))
     
     @property
     def socketio(self):
@@ -55,21 +71,30 @@ class SocketManager:
             data['viewer_id'] = self.viewer.viewer_id
         self.socketio.emit(event, data)
 
-    def emit_with_fallback(self, event: str, data: Dict[str, Any]) -> None:
+    def emit_with_fallback(self, event: str, data: Dict[str, Any], raw_data: Dict[str, Any] = None) -> None:
         """Emit data, using HTTP if the payload is large."""
         if self._payload_size(data) > self.MAX_BYTES:
-            self._emit_http(event, data)
+            if raw_data is not None:
+                self._emit_http_msgpack(event, raw_data)
+            else:
+                self._emit_http(event, data)
         else:
             self.emit(event, data)
     
     def emit_add_geometry(self, geometry) -> None:
-        data = geometry.to_dict()
+        data = as_list(geometry.to_dict())
+        raw = geometry.to_dict(serialize=False)
         geometry_type = data["type"]
-        self.emit_with_fallback(f"add_{geometry_type}", data)
+        self.emit_with_fallback(f"add_{geometry_type}", data, raw)
 
-    def emit_update_object(self, obj, updates: Dict[str, Any]) -> None:
+    def emit_update_object(self, obj, updates: Dict[str, Any], raw_data: Dict[str, Any] = None) -> None:
+        updates = as_list(updates)
         data = {"id": obj.name, "updates": updates}
-        self.emit_with_fallback("update_object", data)
+        if raw_data is not None:
+            raw = {"id": obj.name, "updates": raw_data}
+        else:
+            raw = None
+        self.emit_with_fallback("update_object", data, raw)
     
     def emit_delete_object(self, object_id: str) -> None:
         data = {
@@ -78,7 +103,7 @@ class SocketManager:
         self.emit('delete_object', data)
 
     def emit_add_control(self, control) -> None:
-        data = control.to_dict()
+        data = as_list(control.to_dict())
         self.emit('add_control', data)
 
     def emit_download_file(self, file_bytes: bytes, filename: str) -> None:
@@ -102,8 +127,8 @@ class SocketManager:
         }
         self.emit('delete_control', data)
 
-    def emit_console_output(self, text: str) -> None:
-        data = {"text": text}
+    def emit_console_output(self, segments):
+        data = {"segments": segments}
         self.emit('console_output', data)
 
 class RemoteSocketIO:
@@ -124,9 +149,14 @@ class RemoteSocketIO:
                     print(f"Registering viewer with ID: {self.viewer_id}")
                     self.client.emit('register_viewer', {'viewer_id': self.viewer_id})
                     print("Registration successful")
+            except ConnectionError:
+                print(f"\n[Panopti] ERROR:")
+                print(f"Could not connect to server at {self.url}. Is the panopti server running? To start the server, run: python -m panopti.run_server --host localhost --port 8080")
+                print("See https://armanmaesumi.github.io/panopti/getting_started/ for more information.")
+                print("Exiting...\n")
+                exit(1)
             except Exception as e:
-                print(f"Error connecting to server: {e}")
-                raise
+                print(f"[Panopti] Unexpected error connecting to server: {e}")
     
     def disconnect(self):
         if self.connected:

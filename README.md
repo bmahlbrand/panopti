@@ -1,5 +1,9 @@
-# Panopti - interactive 3D visualization in Python
-![Logo](./assets/banner.jpg)
+<h1>
+  Panopti:<br>
+  <sub>Interactive 3D Visualization in Python</sub>
+</h1>
+
+![Logo](./docs/assets/images/panopti_logo.jpg)
 
 ## [ [Documentation](https://armanmaesumi.github.io/panopti/) ] - [ [PyPI](https://pypi.org/project/panopti/) ]
 
@@ -29,29 +33,25 @@ viewer = panopti.connect(server_url="http://localhost:8080", viewer_id='client')
 
 mesh = trimesh.load('./examples/demosthenes.obj')
 verts, faces = mesh.vertices, mesh.faces
-verts = np.ascontiguousarray(verts, dtype=np.float32)
-faces = np.ascontiguousarray(faces, dtype=np.int32)
 
 # add a mesh to the scene:
 viewer.add_mesh(
     vertices=verts,
     faces=faces,
-    name="Statue",
-    color=(0.8, 0.2, 0.2),
+    name="Statue"
 )
 
 def callback_button(viewer):
     # Update the mesh's vertices
     statue = viewer.get('Statue')
-    v = np.asarray(statue.vertices)
-    v = v * 2.0 
-    statue.update(vertices=v)
+    new_verts = statue.vertices * 2.0
+    statue.update(vertices=new_verts)
 
 viewer.button(callback=callback_button, name='Click Me!')
 
 viewer.hold() # prevent script from terminating
 ```
-See `/examples` for more!
+For more examples see [Documentation](https://armanmaesumi.github.io/panopti/examples/importing_geometry/) or `/examples`
 
 ## Installation
 
@@ -63,14 +63,14 @@ pip install panopti
 To install from source:
 ```bash
 git clone https://github.com/ArmanMaesumi/panopti
-cd panopti/frontend 
 
 # build frontend viewer
+cd panopti/frontend 
 npm install
 npm run build
+cd ..
 
 # install python package
-cd ..
 pip install .
 ```
 
@@ -78,12 +78,11 @@ pip install .
 
 Core dependencies:
 ```bash
-pip install numpy eventlet requests flask flask-socketio
+pip install numpy eventlet requests flask flask-socketio python-socketio[client] tomli msgpack trimesh
 ```
 
 Optional dependencies:
 ```bash
-pip install trimesh         # for exporting meshes
 pip install matplotlib      # for colormap utilities
 pip install plotly==5.22.0  # for plotly figure support
 ```
@@ -94,6 +93,10 @@ pip install mkdocs mkdocs-material mkdocstrings mkdocstrings-python
 ```
 
 --- 
+
+### Development
+
+Details for running the local development workflow can be found in: [`/frontend/README.md`](/frontend/README.md)
 
 #### Cite as
 

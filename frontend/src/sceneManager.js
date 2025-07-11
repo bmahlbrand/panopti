@@ -1,64 +1,166 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { decode as msgpackDecode } from '@msgpack/msgpack';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VertexNormalsHelper } from 'three/addons/helpers/VertexNormalsHelper.js';
 import { downloadFileFromBase64, cameraData } from './utils.js';
 import { debounce, throttle } from './utils.js';
 import * as CONSTANTS from './constants.js';
+import { createMaterial, updateMaterial } from './materials.js';
+import { Gizmo } from './gizmo.js';
+
+function bufferToTypedArray(buf, dtype) {
+    // msgpack returns a Uint8Array for binary payloads. When constructing
+    // typed arrays we must use the underlying ArrayBuffer; otherwise each
+    // byte is interpreted as a separate element.
+    const arrayBuf = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    switch (dtype) {
+        case 'float32':
+            return new Float32Array(arrayBuf);
+        case 'float64':
+            return new Float64Array(arrayBuf);
+        case 'int32':
+            return new Int32Array(arrayBuf);
+        case 'uint32':
+            return new Uint32Array(arrayBuf);
+        case 'uint8':
+            return new Uint8Array(arrayBuf);
+        case 'bool':
+            return new Uint8Array(arrayBuf);
+        default:
+            return new Float32Array(arrayBuf);
+    }
+}
+
+function unpackMsgpack(obj) {
+    if (Array.isArray(obj)) {
+        return obj.map(unpackMsgpack);
+    }
+    if (obj && typeof obj === 'object') {
+        if (obj.__ndarray__) {
+            const arr = bufferToTypedArray(obj.__ndarray__, obj.dtype);
+            const shape = obj.shape || [];
+            if (shape.length <= 1) {
+                return Array.from(arr);
+            }
+            const out = [];
+            const step = shape.slice(1).reduce((a,b)=>a*b,1);
+            for (let i=0;i<shape[0];i++) {
+                out.push(Array.from(arr.slice(i*step,(i+1)*step)));
+            }
+            return out;
+        }
+        const res = {};
+        Object.entries(obj).forEach(([k,v]) => res[k] = unpackMsgpack(v));
+        return res;
+    }
+    return obj;
+}
+
+// Helper to parse hex color or rgb array
+function parseColor(color) {
+    if (typeof color === 'string') {
+        return new THREE.Color(color);
+    } else if (Array.isArray(color)) {
+        return new THREE.Color(...color);
+    }
+    return new THREE.Color(0xffffff);
+}
+
+// Helper to add a light from config
+function addLightFromConfig(scene, lightConfig) {
+    let light;
+    // type, color, intensity are required
+    const type = lightConfig.type;
+    const color = lightConfig.color;
+    const intensity = lightConfig.intensity;
+    if (type === undefined || color === undefined || intensity === undefined) {
+        return;
+    }
+    // optional: castShadow, target (for directional light)
+    let castShadow = lightConfig.castShadow === undefined ? false : lightConfig.castShadow;
+    let target = lightConfig.target === undefined ? [0, 0, 0] : lightConfig.target;
+    if (type === 'directional') {
+        light = new THREE.DirectionalLight(color, intensity);
+        if (lightConfig.position) {
+            light.position.set(...lightConfig.position);
+        }
+        light.target.position.set(...target);
+    } else if (type === 'ambient') {
+        light = new THREE.AmbientLight(color, intensity);
+        castShadow = false;
+    } else if (type === 'point') {
+        light = new THREE.PointLight(color, intensity);
+        if (lightConfig.position) {
+            light.position.set(...lightConfig.position);
+        }
+    }
+    if (light) {
+        light.castShadow = castShadow;
+        scene.add(light);
+    }
+    return light;
+}
+
+// Utility: Expand vertices for non-indexed geometry (face colors)
+function expandVerticesForNonIndexed(vertices, faces) {
+    // vertices: [ [x, y, z], ... ]
+    // faces: [ [a, b, c], ... ]
+    // Returns: [ [x, y, z], ... ] expanded so each face has unique vertices
+    const expanded = [];
+    for (let i = 0; i < faces.length; i++) {
+        const [a, b, c] = faces[i];
+        expanded.push(vertices[a]);
+        expanded.push(vertices[b]);
+        expanded.push(vertices[c]);
+    }
+    return expanded;
+}
 
 // Main Three.js scene setup:
-export function createSceneManager(container, socket, callbacks = {}, backgroundColor = '#f0f0f0') {
+export function createSceneManager(container, socket, callbacks = {}, backgroundColor = '#f0f0f0', cameraConfig = null, setShowWidget) {
     const { onSelectObject, onSceneObjectsChange } = callbacks;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(backgroundColor);
 
-    // Add directional light
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.7 + 1.5 * 3.0);
-    directionalLight.position.set(10, 15, 10);
-    directionalLight.castShadow = true;
-    directionalLight.shadow.camera.near = 0.1;
-    directionalLight.shadow.camera.far = 50;
-    directionalLight.shadow.camera.left = -20;
-    directionalLight.shadow.camera.right = 20;
-    directionalLight.shadow.camera.top = 20;
-    directionalLight.shadow.camera.bottom = -20;
-    directionalLight.shadow.mapSize.width = 2048;
-    directionalLight.shadow.mapSize.height = 2048;
-    scene.add(directionalLight);
-    
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.2 + 2.25);
-    scene.add(ambientLight);
-    
-    const hemiLight = new THREE.HemisphereLight(0x87CEEB, 0x8B7355, 0.0);
-    hemiLight.position.set(0, 20, 0);
-    scene.add(hemiLight);
+    // --- Parse lights in .panopti.toml ---
+    const rendererConfig = window.panoptiConfig.viewer.renderer;
+    Object.entries(rendererConfig).forEach(([key, value]) => {
+        if (key.startsWith('light-')) {
+            addLightFromConfig(scene, value);
+        }
+    });
 
-    const fillLight = new THREE.DirectionalLight(0xffffff, 4.5);
-    fillLight.position.set(-20, 5, -10);
-    scene.add(fillLight);
-
-    let lightSettings = {
-        ambientColor: '#ffffff',
-        ambientIntensity: 0.0,
-        directionalColor: '#ffffff',
-        directionalIntensity: 0.0,
-    };
-    
     // Add camera
     const { clientWidth, clientHeight } = container;
-    const camera = new THREE.PerspectiveCamera(
-        50, clientWidth / clientHeight, 0.1, 1000
+    let camera = new THREE.PerspectiveCamera(
+        cameraConfig.fov, clientWidth / clientHeight, cameraConfig.near, cameraConfig.far
     );
-    // const camera = new THREE.OrthographicCamera( clientWidth / - 2, clientWidth / 2, clientHeight / 2, clientHeight / - 2, 1, 1000 );
-    camera.position.set(5, 5, 5);
-    camera.lookAt(0, 0, 0);
+    camera.position.set(...cameraConfig.position);
+    camera.lookAt(...cameraConfig.target);
     
-    const initialCameraPosition = camera.position.clone();
-    const initialCameraTarget = new THREE.Vector3(0, 0, 0);
+    let renderSettings = {
+        wireframe: 0, // 0: Default (respect per-object), 1: Surface, 2: Wireframe + Surface, 3: Wireframe Only
+        flatShading: false,
+        showNormals: false,
+        showGrid: true,
+        showAxes: true,
+        inspectMode: false,
+    };
     
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+        preserveDrawingBuffer: true,
+        powerPreference: window.panoptiConfig.viewer.renderer['power-preference']
+    });
+
     renderer.setSize(clientWidth, clientHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.shadowMap.enabled = true;
+    // renderer.toneMapping = THREE.NeutralToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    THREE.ColorManagement.enabled = true;
     container.appendChild(renderer.domElement);
     
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -72,8 +174,26 @@ export function createSceneManager(container, socket, callbacks = {}, background
             if (window.viewerId) payload.viewer_id = window.viewerId;
             socket.emit('events.camera', payload);
         }
-    }, CONSTANTS.DEBOUNCE_EVENTS_CAMERA));
+    }, CONSTANTS.DEBOUNCE_CAMERA));
     
+    // Initialize gizmo (transform controls)
+    const gizmo = new Gizmo(scene, camera, renderer, controls, socket);
+    
+    // Set up gizmo update callback to propagate changes to backend
+    gizmo.setUpdateCallback((transforms) => {
+        if (selectedObject && selectedObject.data) {
+            const objectId = selectedObject.data.id;
+            // Update the object locally
+            updateObject(objectId, transforms);
+            
+            // Emit to backend
+            if (socket) {
+                const payload = { id: objectId, updates: transforms };
+                if (window.viewerId) payload.viewer_id = window.viewerId;
+                socket.emit('update_object', payload);
+            }
+        }
+    });
 
     const gridHelper = new THREE.GridHelper(10, 10);
     scene.add(gridHelper);
@@ -85,15 +205,6 @@ export function createSceneManager(container, socket, callbacks = {}, background
     const mouse = new THREE.Vector2();
     const normalHelpers = {};
     const objects = {};
-    
-    let renderSettings = {
-        wireframe: 0, // 0: normal, 1: wireframe with geometry, 2: pure wireframe
-        flatShading: false,
-        showNormals: false,
-        showGrid: true,
-        showAxes: true,
-        inspectMode: false
-    };
     
     let selectedObject = null;
     
@@ -176,6 +287,21 @@ export function createSceneManager(container, socket, callbacks = {}, background
     
     // Add click event listener for object selection and inspection
     container.addEventListener('click', (event) => {
+        // Check if click originated from a UI panel - if so, ignore it
+        // TODO: this is a hack we should find a better way to do this
+        const target = event.target;
+        const isFromUIPanel = target.closest('.console-window') || 
+                             target.closest('.layers-panel') || 
+                             target.closest('.transform-panel') ||
+                             target.closest('.ui-panel') ||
+                             target.closest('.scene-toolbar') ||
+                             target.closest('.render-toolbar') ||
+                             target.closest('.lighting-toolbar') ||
+                             target.closest('.info-bar');
+        if (isFromUIPanel) {
+            return;
+        }
+
         const rect = container.getBoundingClientRect();
         mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -408,6 +534,12 @@ export function createSceneManager(container, socket, callbacks = {}, background
                 if (objectData) {
                     selectedObject = { ...objectData };
                     
+                    // Attach gizmo to selected object if enabled
+                    if (gizmo.isEnabled()) {
+                        gizmo.attach(objectData.object);
+                        gizmo.setSelectedObject({ type: objectData.type, data: objectData.data });
+                    }
+                    
                     // Notify React component about selection
                     if (typeof onSelectObject === 'function') {
                         onSelectObject(null);
@@ -461,47 +593,27 @@ export function createSceneManager(container, socket, callbacks = {}, background
     });
     
     socket.on('update_object', (data) => {
-        // check what index the current object is in the layers panel:
-        const layerIndex = Object.keys(objects).findIndex(id => id === data.id);
         const _selectedObject = selectedObject ? { ...selectedObject } : null;
 
         updateObject(data.id, data.updates);
 
-        if (objects[data.id]) {
-            const objType = objects[data.id].type;
-            const objData = { ...objects[data.id].data, ...data.updates };
-            
-            if (objType === 'mesh') {
-                addMesh(objData);
-            } else if (objType === 'points') {
-                addPoints(objData);
-            } else if (objType === 'arrows') {
-                addArrows(objData);
-            }
-            
-            // Retainn the layer panel's ordering:
-            const updatedObject = objects[data.id];
-            const remainingKeys = Object.keys(objects).filter(key => key !== data.id);
-            remainingKeys.splice(layerIndex, 0, data.id);
-            const newOrder = {};
-            remainingKeys.forEach(key => newOrder[key] = key === data.id ? updatedObject : objects[key]);
-            for (const key in objects) {
-                delete objects[key];
-            }
-            Object.assign(objects, newOrder);
-
-            // Check if the updated object is currently selected, preserve selection:
-            const isSelected = _selectedObject && _selectedObject.data.id === data.id;
-            if (isSelected && typeof onSelectObject === 'function') {
-                console.log('Retaining selection for updated object:', data.id);
-                onSelectObject({ type: _selectedObject.type, data: objData });
-            }
-
+        // Check if the updated object is currently selected, preserve selection:
+        const isSelected = _selectedObject && _selectedObject.data.id === data.id;
+        if (isSelected && typeof onSelectObject === 'function') {
+            selectedObject = { type: objects[data.id].type, data: objects[data.id].data };
+            onSelectObject(selectedObject);
         }
 
         if (typeof onSceneObjectsChange === 'function') {
             onSceneObjectsChange();
         }
+    });
+
+    socket.on('set_camera', (data) => {
+        if (data.viewer_id && window.viewerId && data.viewer_id !== window.viewerId) {
+            return;
+        }
+        setCamera(data.camera);
     });
     
     socket.on('delete_object', (data) => {
@@ -523,8 +635,10 @@ export function createSceneManager(container, socket, callbacks = {}, background
             return;
         }
         fetch(info.url)
-            .then(resp => resp.json())
-            .then(data => {
+            .then(resp => resp.arrayBuffer())
+            .then(buffer => {
+                const decoded = msgpackDecode(new Uint8Array(buffer));
+                const data = unpackMsgpack(decoded);
                 switch (info.event) {
                     case 'add_mesh':
                         addMesh(data);
@@ -540,6 +654,9 @@ export function createSceneManager(container, socket, callbacks = {}, background
                         break;
                     case 'update_object':
                         updateObject(data.id, data.updates);
+                        break;
+                    case 'set_camera':
+                        setCamera(data.camera);
                         break;
                     case 'download_file':
                         downloadFileFromBase64(data.filename, data.data);
@@ -586,33 +703,34 @@ export function createSceneManager(container, socket, callbacks = {}, background
         }
         
         let material;
-        const wireframeMode = data.wireframe ? 2 : renderSettings.wireframe;
-        if (wireframeMode === 2) {
-            material = new THREE.MeshBasicMaterial({
-                color: new THREE.Color(data.color[0], data.color[1], data.color[2]),
-                wireframe: true
-            });
+        if (data.material) {
+            // Create material from backend data
+            material = createMaterial(data.material);
+            if (vcolors || fcolors) {
+                material.vertexColors = true;
+            }
         } else {
-            material = new THREE.MeshPhongMaterial({
-                color: new THREE.Color(data.color[0], data.color[1], data.color[2]),
+            // Default material when none specified, this generally wont trigger unless the user deleted the material attribute
+            material = new THREE.MeshStandardMaterial({
+                color: new THREE.Color(1.0, 1.0, 1.0),
                 vertexColors: vcolors || fcolors,
                 transparent: data.opacity < 1.0,
                 opacity: data.opacity,
                 flatShading: renderSettings.flatShading,
-                shininess: 30
+                roughness: 0.45,
+                metalness: 0.1
             });
         }
-        
-        let wireframeHelper = null;
-        if (wireframeMode === 1) {
-            const wireGeometry = new THREE.WireframeGeometry(geometry);
-            wireframeHelper = new THREE.LineSegments(wireGeometry);
-            wireframeHelper.material.depthTest = false;
-            wireframeHelper.material.opacity = 0.25;
-            wireframeHelper.material.transparent = true;
-            wireframeHelper.material.color = new THREE.Color(0, 0, 0);
+
+        const originalWireframe = material.wireframe;
+        if (renderSettings.wireframe === 1) { 
+            // surface only
+            material.wireframe = false;
+        } else if (renderSettings.wireframe > 1) { 
+            // wireframe + surface or wireframe only
+            material.wireframe = true;
         }
-        
+
         const mesh = new THREE.Mesh(geometry, material);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
@@ -620,17 +738,12 @@ export function createSceneManager(container, socket, callbacks = {}, background
         mesh.rotation.set(data.rotation[0], data.rotation[1], data.rotation[2]);
         mesh.scale.set(data.scale[0], data.scale[1], data.scale[2]);
         
-        if (wireframeMode !== 2 && !geometry.attributes.normal) {
+        if (!geometry.attributes.normal) {
             geometry.computeVertexNormals();
         }
         
         mesh.visible = data.visible;
         scene.add(mesh);
-        
-        if (wireframeHelper) {
-            mesh.add(wireframeHelper);
-            mesh.userData.wireframeHelper = wireframeHelper;
-        }
         
         if (renderSettings.showNormals) {
             const normalHelper = new VertexNormalsHelper(mesh, 0.2, 0x00ff00, 1);
@@ -638,46 +751,88 @@ export function createSceneManager(container, socket, callbacks = {}, background
             normalHelpers[data.id] = normalHelper;
         }
         
+        // Store original opacity for visibility toggle functionality
+        if (!data.originalOpacity) {
+            if (data.material && data.material.opacity !== undefined) {
+                data.originalOpacity = data.material.opacity;
+            } else {
+                data.originalOpacity = data.opacity || 1.0;
+            }
+        }
+        
         objects[data.id] = {
             object: mesh,
             type: 'mesh',
             data: data
         };
+        // mesh.userData.originalWireframe = !!data.wireframe;
+        mesh.userData.originalWireframe = originalWireframe;
+        applyRenderSettings(renderSettings);
     }
     
     function addAnimatedMesh(data) {
         if (objects[data.id]) {
             deleteObject(data.id);
         }
-        
         // Validate vertices format - should be 3D array (frames, vertices, 3)
-        if (!data.vertices || data.vertices.length === 0 || !Array.isArray(data.vertices[0]) || !Array.isArray(data.vertices[0][0])) {
+        // After msgpack unpacking, vertices might be flattened: (frames, 3*vertices) instead of (frames, vertices, 3)
+        if (!data.vertices || data.vertices.length === 0 || !data.vertices[0] || !data.vertices[0].length) {
             console.error('Invalid animated mesh vertices format. Expected (frames, vertices, 3)');
+            console.error('data.vertices:', data.vertices);
             return;
         }
         
         const numFrames = data.vertices.length;
-        const numVertices = data.vertices[0].length;
+        const flatVerticesPerFrame = data.vertices[0].length;
         
+        // Check if vertices are flattened (3*vertices) and reshape if needed
+        let reshapedVertices = data.vertices;
+        let numVertices;
+        const isFlattened = !Array.isArray(data.vertices[0][0]);
+        if (isFlattened) {
+            // Vertices are likely flattened, reshape them
+            numVertices = flatVerticesPerFrame / 3;
+            reshapedVertices = data.vertices.map(frameVerts => {
+                const reshaped = [];
+                for (let i = 0; i < numVertices; i++) {
+                    reshaped.push([frameVerts[i * 3], frameVerts[i * 3 + 1], frameVerts[i * 3 + 2]]);
+                }
+                return reshaped;
+            });
+        } else {
+            numVertices = data.vertices[0].length;
+        }
+        
+        // Update data.vertices with reshaped version
+        data.vertices = reshapedVertices;
         let geometry = new THREE.BufferGeometry();
-        
-        const initialVertices = new Float32Array(data.vertices[0].flat());
+        let useFaceColors = false;
+        let expandedVerticesFrames = null;
+        // If face colors, expand all frames to non-indexed
+        if (data.face_colors && data.faces) {
+            useFaceColors = true;
+            expandedVerticesFrames = data.vertices.map(frameVerts => expandVerticesForNonIndexed(frameVerts, data.faces));
+        }
+        // Use expanded or original for initial frame
+        const initialVertices = new Float32Array(
+            useFaceColors ? expandedVerticesFrames[0].flat() : data.vertices[0].flat()
+        );
         geometry.setAttribute('position', new THREE.BufferAttribute(initialVertices, 3));
-        
-        if (data.faces && data.faces.length > 0) {
+        if (data.faces && data.faces.length > 0 && !useFaceColors) {
             const indices = new Uint32Array(data.faces.flat());
             geometry.setIndex(new THREE.BufferAttribute(indices, 1));
         }
-        
         // Set vertex colors if available (using first frame)
         let vcolors = false;
         let fcolors = false;
+        let baseColor = new THREE.Color(data.color[0], data.color[1], data.color[2]);
         if (data.vertex_colors) {
             const colors = new Float32Array(data.vertex_colors.flat());
             geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
             vcolors = true;
+            baseColor = new THREE.Color(1.0, 1.0, 1.0);
         } else if (data.face_colors) {
-            geometry = geometry.toNonIndexed();
+            geometry = geometry.toNonIndexed(); // already non-indexed, but safe
             const colors = [];
             for (let i = 0; i < data.face_colors.length; i++) {
                 colors.push(...data.face_colors[i]);
@@ -686,77 +841,73 @@ export function createSceneManager(container, socket, callbacks = {}, background
             }
             geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
             fcolors = true;
+            baseColor = new THREE.Color(1.0, 1.0, 1.0);
         }
-        
         let material;
-        const wireframeMode = data.wireframe ? 2 : renderSettings.wireframe;
-        
-        if (wireframeMode === 2) {
-            material = new THREE.MeshBasicMaterial({
-                color: new THREE.Color(data.color[0], data.color[1], data.color[2]),
-                wireframe: true
-            });
+        if (data.material) {
+            material = createMaterial(data.material);
+            if (vcolors || fcolors) {
+                material.vertexColors = true;
+            }
         } else {
-            material = new THREE.MeshPhongMaterial({
-                color: new THREE.Color(data.color[0], data.color[1], data.color[2]),
+            material = new THREE.MeshStandardMaterial({
+                color: baseColor,
                 vertexColors: vcolors || fcolors,
                 transparent: data.opacity < 1.0,
                 opacity: data.opacity,
                 flatShading: renderSettings.flatShading,
-                shininess: 30
+                roughness: 0.45,
+                metalness: 0.1
             });
         }
-        
-        let wireframeHelper = null;
-        if (wireframeMode === 1) {
-            const wireGeometry = new THREE.WireframeGeometry(geometry);
-            wireframeHelper = new THREE.LineSegments(wireGeometry);
-            wireframeHelper.material.depthTest = false;
-            wireframeHelper.material.opacity = 0.25;
-            wireframeHelper.material.transparent = true;
-            wireframeHelper.material.color = new THREE.Color(0, 0, 0);
+        const originalWireframe = material.wireframe;
+        if (renderSettings.wireframe === 1) {
+            material.wireframe = false;
+        } else if (renderSettings.wireframe > 1) {
+            material.wireframe = true;
         }
-        
         const mesh = new THREE.Mesh(geometry, material);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         mesh.position.set(data.position[0], data.position[1], data.position[2]);
         mesh.rotation.set(data.rotation[0], data.rotation[1], data.rotation[2]);
         mesh.scale.set(data.scale[0], data.scale[1], data.scale[2]);
-        
-        if (wireframeMode !== 2 && !geometry.attributes.normal) {
+        if (!geometry.attributes.normal) {
             geometry.computeVertexNormals();
         }
-        
         mesh.visible = data.visible;
         scene.add(mesh);
-        
-        if (wireframeHelper) {
-            mesh.add(wireframeHelper);
-            mesh.userData.wireframeHelper = wireframeHelper;
-        }
-        
         if (renderSettings.showNormals) {
             const normalHelper = new VertexNormalsHelper(mesh, 0.2, 0x00ff00, 1);
             scene.add(normalHelper);
             normalHelpers[data.id] = normalHelper;
         }
-        
         const animationData = {
             vertices: data.vertices,
+            expandedVerticesFrames: expandedVerticesFrames, // may be null
             framerate: data.framerate,
             currentFrame: data.current_frame || 0,
             isPlaying: data.is_playing || false,
             startTime: data.is_playing ? Date.now() / 1000 : null,
-            numFrames: numFrames
+            numFrames: numFrames,
+            useFaceColors: useFaceColors
         };
-        
+        // Store original opacity for visibility toggle functionality
+        if (!data.originalOpacity) {
+            if (data.material && data.material.opacity !== undefined) {
+                data.originalOpacity = data.material.opacity;
+            } else {
+                data.originalOpacity = data.opacity || 1.0;
+            }
+        }
         objects[data.id] = {
             object: mesh,
             type: 'animated_mesh',
             data: data,
             animation: animationData
         };
+        mesh.userData.originalWireframe = originalWireframe;
+        applyRenderSettings(renderSettings);
     }
     
     function addPoints(data) {
@@ -780,12 +931,24 @@ export function createSceneManager(container, socket, callbacks = {}, background
                 color: new THREE.Color(data.colors[0], data.colors[1], data.colors[2])
             });
         }
+        // set opacity:
+        material.opacity = data.opacity;
+        material.transparent = data.opacity < 1.0;
 
         const spheres = new THREE.InstancedMesh(geometry, material, count);
         const dummy = new THREE.Object3D();
+        
+        // Apply initial scale to point positions if provided
+        const scale = data.scale || [1, 1, 1];
+        
         for (let i = 0; i < count; i++) {
             const p = data.points[i];
-            dummy.position.set(p[0], p[1], p[2]);
+            // Apply scale to point position
+            dummy.position.set(
+                p[0] * scale[0],
+                p[1] * scale[1],
+                p[2] * scale[2]
+            );
             dummy.updateMatrix();
             spheres.setMatrixAt(i, dummy.matrix);
 
@@ -802,8 +965,23 @@ export function createSceneManager(container, socket, callbacks = {}, background
         spheres.castShadow = true;
         spheres.receiveShadow = true;
         spheres.visible = data.visible;
+        
+        // Apply transformations (except scale for points - handled in updateObject)
+        if (data.position) {
+            spheres.position.set(data.position[0], data.position[1], data.position[2]);
+        }
+        if (data.rotation) {
+            spheres.rotation.set(data.rotation[0], data.rotation[1], data.rotation[2]);
+        }
+        // Note: Scale for points is handled by scaling the point positions, not the object
+        
         scene.add(spheres);
 
+        // Store original opacity for visibility toggle functionality
+        if (!data.originalOpacity) {
+            data.originalOpacity = data.opacity;
+        }
+        
         objects[data.id] = {
             object: spheres,
             type: 'points',
@@ -840,6 +1018,8 @@ export function createSceneManager(container, socket, callbacks = {}, background
         const group = new THREE.Group();
         const starts = data.starts;
         const ends = data.ends;
+        data.opacity = data.opacity;
+        data.transparent = data.opacity < 1.0;
         for (let i = 0; i < starts.length; i++) {
             let col = Array.isArray(data.color[0]) ? new THREE.Color(data.color[i][0], data.color[i][1], data.color[i][2]) : new THREE.Color(data.color[0], data.color[1], data.color[2]);
             const arrowHelper = customArrow(
@@ -852,7 +1032,24 @@ export function createSceneManager(container, socket, callbacks = {}, background
         }
         
         group.visible = data.visible !== undefined ? data.visible : true;
+        
+        // Apply transformations
+        if (data.position) {
+            group.position.set(data.position[0], data.position[1], data.position[2]);
+        }
+        if (data.rotation) {
+            group.rotation.set(data.rotation[0], data.rotation[1], data.rotation[2]);
+        }
+        if (data.scale) {
+            group.scale.set(data.scale[0], data.scale[1], data.scale[2]);
+        }
+        
         scene.add(group);
+        
+        // Store original opacity for visibility toggle functionality
+        if (!data.originalOpacity) {
+            data.originalOpacity = data.opacity;
+        }
         
         objects[data.id] = {
             object: group,
@@ -862,52 +1059,335 @@ export function createSceneManager(container, socket, callbacks = {}, background
     }
     
     function updateObject(id, updates) {
+        // console.log('updateObject', id, updates);
         const objData = objects[id];
         if (!objData) return;
 
-        const newUpdates = { ...updates };
+        const GEOMETRY_PROPERTIES = {
+            mesh: ['vertices', 'faces', 'vertex_colors', 'face_colors'],
+            animated_mesh: ['vertices', 'faces', 'vertex_colors', 'face_colors'],
+            points: ['points', 'colors', 'size'],
+            arrows: ['starts', 'ends', 'color', 'width']
+        };
 
-        if (objData.type === 'mesh' || objData.type === 'points' || objData.type === 'animated_mesh') {
-            if (updates.visible !== undefined) {
-                objData.object.visible = updates.visible;
-                objData.data.visible = updates.visible;
-            }
+        const TRANSFORM_PROPERTIES = ['position', 'rotation', 'scale'];
+        const MATERIAL_PROPERTIES = ['material', 'opacity', 'visible'];
 
-            if (updates.opacity !== undefined && objData.object.material) {
-                objData.data.opacity = updates.opacity;
-                objData.object.material.opacity = updates.opacity;
-                objData.object.material.transparent = updates.opacity < 1.0;
-            }
-        } else if (objData.type === 'arrows') {
-            if (updates.visible !== undefined) {
-                objData.object.visible = updates.visible;
-                objData.data.visible = updates.visible;
-            }
-        }
-
-        if (updates.position) {
-            objData.object.position.set(updates.position[0], updates.position[1], updates.position[2]);
-            objData.data.position = updates.position;
-        }
-
-        if (updates.rotation) {
-            objData.object.rotation.set(updates.rotation[0], updates.rotation[1], updates.rotation[2]);
-            objData.data.rotation = updates.rotation;
-        }
-
-        if (updates.scale) {
-            objData.object.scale.set(updates.scale[0], updates.scale[1], updates.scale[2]);
-            objData.data.scale = updates.scale;
-        }
-
-        // Store any additional fields
-        for (const [key, value] of Object.entries(updates)) {
-            if (!['visible', 'opacity', 'position', 'rotation', 'scale'].includes(key)) {
-                objData.data[key] = value;
+        // Check if any geometry properties need updating
+        const geometryProps = GEOMETRY_PROPERTIES[objData.type] || [];
+        const hasGeometryUpdates = geometryProps.some(prop => updates[prop] !== undefined);
+        
+        // Try in-place geometry updates first
+        if (hasGeometryUpdates) {
+            const needsRebuild = !tryInPlaceGeometryUpdate(objData, updates);
+            if (needsRebuild) {
+                rebuildObject(objData, updates);
+                return;
             }
         }
+
+        updateTransforms(objData, updates);
+        updateProperties(objData, updates);
+        updateSelectionIfNeeded(objData, id);
 
         return objData;
+    }
+
+    // Try to update geometry in-place without rebuilding the entire object
+    function tryInPlaceGeometryUpdate(objData, updates) {
+        const { type, object, data } = objData;
+
+        if (type === 'mesh' || type === 'animated_mesh') {
+            return tryInPlaceMeshUpdate(objData, updates);
+        } else if (type === 'points') {
+            return tryInPlacePointsUpdate(objData, updates);
+        } else if (type === 'arrows') {
+            // Arrows always need rebuild for geometry changes
+            return false;
+        }
+
+        return true;
+    }
+
+    // In-place updates for mesh and animated mesh objects
+    function tryInPlaceMeshUpdate(objData, updates) {
+        const { object, data, type } = objData;
+        const geom = object.geometry;
+        let success = true;
+
+        if (updates.vertices !== undefined) {
+            const newVerts = updates.vertices.flat();
+            const posAttr = geom.getAttribute('position');
+            if (posAttr && posAttr.count * 3 === newVerts.length) {
+                posAttr.array.set(newVerts);
+                posAttr.needsUpdate = true;
+                data.vertices = updates.vertices;
+            } else {
+                success = false;
+            }
+        }
+
+        if (updates.faces !== undefined) {
+            const newIndices = updates.faces.flat();
+            const idxAttr = geom.getIndex();
+            if (idxAttr && idxAttr.count === newIndices.length) {
+                idxAttr.array.set(newIndices);
+                idxAttr.needsUpdate = true;
+                data.faces = updates.faces;
+            } else {
+                success = false;
+            }
+        }
+
+        if (updates.vertex_colors !== undefined) {
+            if (updates.vertex_colors === null) {
+                delete data.vertex_colors;
+            } else {
+                const newColors = updates.vertex_colors.flat();
+                const colorAttr = geom.getAttribute('color');
+                if (colorAttr && colorAttr.count * 3 === newColors.length) {
+                    colorAttr.array.set(newColors);
+                    colorAttr.needsUpdate = true;
+                    data.vertex_colors = updates.vertex_colors;
+                } else {
+                    // Try to replace the color attribute if vertex count matches
+                    const posAttr = geom.getAttribute('position');
+                    if (posAttr && posAttr.count * 3 === newColors.length) {
+                        geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(newColors), 3));
+                        geom.attributes.color.needsUpdate = true;
+                        data.vertex_colors = updates.vertex_colors;
+                    } else {
+                        success = false;
+                    }
+                }
+            }
+        }
+
+        if (updates.face_colors !== undefined) {
+            if (updates.face_colors === null) {
+                delete data.face_colors;
+            } else {
+                // For animated meshes with face colors, always rebuild to avoid issues
+                if (type === 'animated_mesh') {
+                    success = false;
+                } else {
+                    const newColors = [];
+                    for (let i = 0; i < updates.face_colors.length; i++) {
+                        newColors.push(...updates.face_colors[i]);
+                        newColors.push(...updates.face_colors[i]);
+                        newColors.push(...updates.face_colors[i]);
+                    }
+                    const colorAttr = geom.getAttribute('color');
+                    if (colorAttr && colorAttr.count * 3 === newColors.length) {
+                        colorAttr.array.set(newColors);
+                        colorAttr.needsUpdate = true;
+                        data.face_colors = updates.face_colors;
+                    } else {
+                        // Try to replace the color attribute if vertex count matches
+                        const posAttr = geom.getAttribute('position');
+                        if (posAttr && posAttr.count * 3 === newColors.length) {
+                            geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(newColors), 3));
+                            geom.attributes.color.needsUpdate = true;
+                            data.face_colors = updates.face_colors;
+                        } else {
+                            success = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update material vertexColors setting
+        if (object.material) {
+            const hasVertexColors = data.vertex_colors && data.vertex_colors.length > 0;
+            const hasFaceColors = data.face_colors && data.face_colors.length > 0;
+            object.material.vertexColors = hasVertexColors || hasFaceColors;
+            object.material.needsUpdate = true;
+        }
+
+        return success;
+    }
+
+    // In-place updates for points objects
+    function tryInPlacePointsUpdate(objData, updates) {
+        const { object, data } = objData;
+        let success = true;
+
+        if (updates.points !== undefined) {
+            const count = updates.points.length;
+            if (object.count === count) {
+                const scale = data.scale || [1, 1, 1];
+                const dummy = new THREE.Object3D();
+                for (let i = 0; i < count; i++) {
+                    const p = updates.points[i];
+                    dummy.position.set(
+                        p[0] * scale[0],
+                        p[1] * scale[1],
+                        p[2] * scale[2]
+                    );
+                    dummy.updateMatrix();
+                    object.setMatrixAt(i, dummy.matrix);
+                }
+                object.instanceMatrix.needsUpdate = true;
+                data.points = updates.points;
+            } else {
+                success = false;
+            }
+        }
+
+        if (updates.colors !== undefined) {
+            const count = updates.colors.length;
+            if (object.count === count && object.instanceColor) {
+                for (let i = 0; i < count; i++) {
+                    const c = updates.colors[i];
+                    object.setColorAt(i, new THREE.Color(c[0], c[1], c[2]));
+                }
+                object.instanceColor.needsUpdate = true;
+                data.colors = updates.colors;
+            } else {
+                success = false;
+            }
+        }
+
+        // Handle point size (requires rebuild)
+        if (updates.size !== undefined && updates.size !== data.size) {
+            success = false;
+        }
+
+        return success;
+    }
+
+    // Rebuild the entire object when in-place updates aren't possible
+    function rebuildObject(objData, updates) {
+        const { type, data } = objData;
+        const isSelected = selectedObject && selectedObject.data.id === data.id;
+        const newData = { ...data, ...updates };
+
+        deleteObject(data.id);
+        
+        switch (type) {
+            case 'mesh':
+                addMesh(newData);
+                break;
+            case 'animated_mesh':
+                addAnimatedMesh(newData);
+                break;
+            case 'points':
+                addPoints(newData);
+                break;
+            case 'arrows':
+                addArrows(newData);
+                break;
+        }
+
+        if (isSelected) {
+            selectedObject = { type: objects[data.id].type, data: objects[data.id].data };
+            if (typeof onSelectObject === 'function') {
+                onSelectObject(selectedObject);
+            }
+        }
+    }
+
+    // Update transform properties (position, rotation, scale)
+    function updateTransforms(objData, updates) {
+        const { object, data, type } = objData;
+
+        if (updates.position !== undefined) {
+            object.position.set(updates.position[0], updates.position[1], updates.position[2]);
+            data.position = updates.position;
+        }
+
+        if (updates.rotation !== undefined) {
+            object.rotation.set(updates.rotation[0], updates.rotation[1], updates.rotation[2]);
+            data.rotation = updates.rotation;
+        }
+
+        if (updates.scale !== undefined) {
+            if (type === 'points') {
+                // For points, scale affects individual point positions
+                data.scale = updates.scale;
+                const originalPoints = data.points;
+                const scale = updates.scale;
+                const dummy = new THREE.Object3D();
+                for (let i = 0; i < originalPoints.length; i++) {
+                    const p = originalPoints[i];
+                    dummy.position.set(
+                        p[0] * scale[0],
+                        p[1] * scale[1],
+                        p[2] * scale[2]
+                    );
+                    dummy.updateMatrix();
+                    object.setMatrixAt(i, dummy.matrix);
+                }
+                object.instanceMatrix.needsUpdate = true;
+            } else {
+                object.scale.set(updates.scale[0], updates.scale[1], updates.scale[2]);
+                data.scale = updates.scale;
+            }
+        }
+    }
+
+    // Update material and other properties
+    function updateProperties(objData, updates) {
+        const { object, data, type } = objData;
+
+        if (updates.visible !== undefined) {
+            object.visible = updates.visible;
+            data.visible = updates.visible;
+        }
+
+        if (updates.opacity !== undefined) {
+            data.opacity = updates.opacity;
+            data.originalOpacity = updates.opacity;
+            
+            if (type === 'arrows') {
+                // Arrows have multiple materials (one per child)
+                object.children.forEach(child => {
+                    if (child.material) {
+                        child.material.opacity = updates.opacity;
+                        child.material.transparent = updates.opacity < 1.0;
+                    }
+                });
+            } else if (object.material) {
+                // Single material objects
+                object.material.opacity = updates.opacity;
+                object.material.transparent = updates.opacity < 1.0;
+            }
+        }
+
+        if (updates.material !== undefined && object.material) {
+            const newMaterial = updateMaterial(object.material, updates.material);
+            
+            // if mat type changed we reassign using newMaterial 
+            // (otherwise updates are done in-place on `object.material` in `updateMaterial`)
+            if (newMaterial.type !== object.material.type) {
+                const vertexColors = object.material.vertexColors;
+                object.material.dispose();
+                object.material = newMaterial;
+                object.material.vertexColors = vertexColors;
+            }
+            
+            data.material = updates.material;
+            if (updates.material.opacity !== undefined && !data.originalOpacity) {
+                data.originalOpacity = updates.material.opacity;
+            }
+        }
+
+        // Handle any other properties not explicitly handled above
+        const handledProps = ['visible', 'opacity', 'position', 'rotation', 'scale', 'material'];
+        for (const [key, value] of Object.entries(updates)) {
+            if (!handledProps.includes(key)) {
+                data[key] = value;
+            }
+        }
+    }
+
+    function updateSelectionIfNeeded(objData, id) {
+        if (selectedObject && selectedObject.data.id === id) {
+            if (typeof onSelectObject === 'function') {
+                onSelectObject({ type: objData.type, data: objData.data });
+            }
+        }
     }
     
     function deleteObject(id) {
@@ -945,6 +1425,10 @@ export function createSceneManager(container, socket, callbacks = {}, background
         
         if (selectedObject && selectedObject.data.id === id) {
             selectedObject = null;
+            // Detach gizmo when selected object is deleted
+            if (gizmo) {
+                gizmo.detach();
+            }
             if (typeof onSelectObject === 'function') {
                 onSelectObject(null);
             }
@@ -967,6 +1451,11 @@ export function createSceneManager(container, socket, callbacks = {}, background
     function update() {
         controls.update();
         
+        // Update gizmo
+        if (gizmo) {
+            gizmo.update();
+        }
+
         // Update animated meshes
         const currentTime = Date.now() / 1000;
         for (const [id, objData] of Object.entries(objects)) {
@@ -975,34 +1464,20 @@ export function createSceneManager(container, socket, callbacks = {}, background
                 const elapsed = currentTime - animation.startTime;
                 const frameFloat = (elapsed * animation.framerate) % animation.numFrames;
                 const currentFrame = Math.floor(frameFloat);
-                const nextFrame = (currentFrame + 1) % animation.numFrames;
-                const t = frameFloat - currentFrame;
-                
-                // Interpolate between current and next frame
-                const currentVertices = animation.vertices[currentFrame];
-                const nextVertices = animation.vertices[nextFrame];
-                const interpolatedVertices = [];
-                
-                for (let i = 0; i < currentVertices.length; i++) {
-                    const current = currentVertices[i];
-                    const next = nextVertices[i];
-                    interpolatedVertices.push([
-                        current[0] + t * (next[0] - current[0]),
-                        current[1] + t * (next[1] - current[1]),
-                        current[2] + t * (next[2] - current[2])
-                    ]);
+                let currentVertices;
+                if (animation.useFaceColors && animation.expandedVerticesFrames) {
+                    currentVertices = animation.expandedVerticesFrames[currentFrame];
+                } else {
+                    currentVertices = animation.vertices[currentFrame];
                 }
-                
                 // Update geometry
-                const vertices = new Float32Array(interpolatedVertices.flat());
+                const vertices = new Float32Array(currentVertices.flat());
                 objData.object.geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
                 objData.object.geometry.attributes.position.needsUpdate = true;
-                
                 // Recompute normals if needed
                 if (!objData.data.wireframe) {
                     objData.object.geometry.computeVertexNormals();
                 }
-                
                 animation.currentFrame = currentFrame;
             }
         }
@@ -1073,9 +1548,59 @@ export function createSceneManager(container, socket, callbacks = {}, background
     }
     
     function resetCamera() {
-        camera.position.copy(initialCameraPosition);
-        controls.target.copy(initialCameraTarget);
+        setCamera(window.panoptiConfig.viewer.camera);
         controls.update();
+    }
+
+    function setCamera(cam) {
+        if (cam.position) {
+            camera.position.set(cam.position[0], cam.position[1], cam.position[2]);
+        }
+        if (cam.quaternion) {
+            camera.quaternion.set(cam.quaternion[0], cam.quaternion[1], cam.quaternion[2], cam.quaternion[3]);
+        } else if (cam.rotation) {
+            camera.rotation.set(cam.rotation[0], cam.rotation[1], cam.rotation[2]);
+        }
+        if (cam.up) {
+            camera.up.set(cam.up[0], cam.up[1], cam.up[2]);
+        }
+        if (cam.fov !== undefined) camera.fov = cam.fov;
+        if (cam.near !== undefined) camera.near = cam.near;
+        if (cam.far !== undefined) camera.far = cam.far;
+        if (cam.aspect !== undefined) camera.aspect = cam.aspect;
+        if (cam.projection_mode) {
+            const mode = cam.projection_mode;
+            if (mode === 'orthographic' && !camera.isOrthographicCamera) {
+                const { clientWidth, clientHeight } = container;
+                const ortho = new THREE.OrthographicCamera(
+                    clientWidth / -2, clientWidth / 2,
+                    clientHeight / 2, clientHeight / -2,
+                    camera.near, camera.far
+                );
+                ortho.position.copy(camera.position);
+                ortho.rotation.copy(camera.rotation);
+                camera = ortho;
+                controls.object = camera;
+            } else if (mode === 'perspective' && !camera.isPerspectiveCamera) {
+                const persp = new THREE.PerspectiveCamera(
+                    camera.fov, camera.aspect, camera.near, camera.far
+                );
+                persp.position.copy(camera.position);
+                persp.rotation.copy(camera.rotation);
+                camera = persp;
+                controls.object = camera;
+            }
+        }
+        if (cam.target) {
+            controls.target.set(cam.target[0], cam.target[1], cam.target[2]);
+            camera.lookAt(cam.target[0], cam.target[1], cam.target[2]);
+        }
+        camera.updateProjectionMatrix();
+        // controls.update();
+    }
+
+    function lookAt(position, target) {
+        setCamera({ position, target });
     }
     
     function setBackgroundColor(colorHex) {
@@ -1096,6 +1621,11 @@ export function createSceneManager(container, socket, callbacks = {}, background
             container.removeChild(inspectionDiv);
         }
         
+        // Dispose gizmo
+        if (gizmo) {
+            gizmo.dispose();
+        }
+        
         if (renderer) {
             renderer.dispose();
             if (container.contains(renderer.domElement)) {
@@ -1108,11 +1638,11 @@ export function createSceneManager(container, socket, callbacks = {}, background
         renderSettings = { ...settings };
         
         for (const [id, objData] of Object.entries(objects)) {
-            if (objData.type === 'mesh') {
+            if (objData.type === 'mesh' || objData.type === 'animated_mesh') {
                 const { object, data } = objData;
 
                 if (object.material && !Array.isArray(object.material)) {
-                    const wireframeMode = renderSettings.wireframe;
+                    const mat = object.material;
 
                     if (object.userData.wireframeHelper) {
                         object.remove(object.userData.wireframeHelper);
@@ -1124,54 +1654,37 @@ export function createSceneManager(container, socket, callbacks = {}, background
                         }
                         object.userData.wireframeHelper = null;
                     }
-                    
-                    // Apply appropriate material based on wireframe mode
-                    if (wireframeMode === 2) {
-                        // Mode 2: Pure wireframe
-                        if (object.material.type !== 'MeshBasicMaterial' || !object.material.wireframe) {
-                            // Replace with wireframe material
-                            const wireframeMaterial = new THREE.MeshBasicMaterial({
-                                color: object.material.color,
-                                wireframe: true
-                            });
-                            object.material.dispose();
-                            object.material = wireframeMaterial;
-                        }
-                    } else if (wireframeMode === 0 || wireframeMode === 1) {
-                        // Mode 0: Normal or Mode 1: Wireframe with geometry
-                        if (object.material.type !== 'MeshPhongMaterial' && !data.wireframe) {
-                            // Replace with phong material
-                            const phongMaterial = new THREE.MeshPhongMaterial({
-                                color: object.material.color,
-                                flatShading: renderSettings.flatShading,
-                                vertexColors: data.vertex_colors ? true : false,
-                                transparent: data.opacity < 1.0,
-                                opacity: data.opacity,
-                                shininess: 30
-                            });
-                            object.material.dispose();
-                            object.material = phongMaterial;
-                        } else if (object.material.type === 'MeshPhongMaterial') {
-                            // Update flat shading
-                            object.material.flatShading = renderSettings.flatShading;
-                            object.material.needsUpdate = true;
-                        }
-                        
-                        // Add wireframe overlay for Mode 1
-                        if (wireframeMode === 1) {
-                            const wireGeometry = new THREE.WireframeGeometry(object.geometry);
-                            const wireframeHelper = new THREE.LineSegments(wireGeometry);
-                            wireframeHelper.material.depthTest = true;
-                            wireframeHelper.material.opacity = 0.0;
-                            wireframeHelper.material.transparent = false;
-                            wireframeHelper.material.color = new THREE.Color(0, 0, 0);
-                            object.add(wireframeHelper);
-                            object.userData.wireframeHelper = wireframeHelper;
-                        }
+
+                    const original = object.userData.originalWireframe;
+
+                    if (renderSettings.wireframe === 0) {
+                        mat.wireframe = original;
+                    } else if (renderSettings.wireframe === 1) {
+                        mat.wireframe = false;
+                    } else if (renderSettings.wireframe === 2) {
+                        mat.wireframe = false;
+                        const wireGeometry = new THREE.WireframeGeometry(object.geometry);
+                        const wireframeHelper = new THREE.LineSegments(wireGeometry);
+                        wireframeHelper.material.depthTest = true;
+                        wireframeHelper.material.transparent = true;
+                        wireframeHelper.material.color = new THREE.Color(0, 0, 0);
+                        object.add(wireframeHelper);
+                        object.userData.wireframeHelper = wireframeHelper;
+                    } else if (renderSettings.wireframe === 3) {
+                        mat.wireframe = true;
+                    }
+
+                    mat.flatShading = renderSettings.flatShading;
+                    mat.vertexColors = (data.vertex_colors || data.face_colors) ? true : false;
+                    // mat.transparent = data.opacity < 1.0;
+                    // mat.opacity = data.opacity;
+                    mat.needsUpdate = true;
+
+                    if (object.geometry && object.geometry.computeVertexNormals) {
+                        object.geometry.computeVertexNormals();
                     }
                 }
-                
-                // Handle normals visibility
+
                 if (renderSettings.showNormals) {
                     if (!normalHelpers[id]) {
                         const normalHelper = new VertexNormalsHelper(object, 0.2, 0x00ff00, 1);
@@ -1198,24 +1711,6 @@ export function createSceneManager(container, socket, callbacks = {}, background
         return selectedObject;
     }
     
-    function applyLightSettings(settings) {
-        return;
-        // Update internal light settings
-        lightSettings = { ...settings };
-        
-        // Update ambient light
-        if (lightSettings.ambientColor !== undefined && lightSettings.ambientIntensity !== undefined) {
-            ambientLight.color.set(lightSettings.ambientColor);
-            ambientLight.intensity = lightSettings.ambientIntensity;
-        }
-        
-        // Update directional light
-        if (lightSettings.directionalColor !== undefined && lightSettings.directionalIntensity !== undefined) {
-            directionalLight.color.set(lightSettings.directionalColor);
-            directionalLight.intensity = lightSettings.directionalIntensity;
-        }
-    }
-    
     // Get the currently selected object
     function getSelectedObject() {
         return selectedObject;
@@ -1235,6 +1730,10 @@ export function createSceneManager(container, socket, callbacks = {}, background
     function selectObject(id) {
         if (id === null) {
             selectedObject = null;
+            // Detach gizmo when deselecting
+            if (gizmo) {
+                gizmo.detach();
+            }
             if (typeof onSelectObject === 'function') {
                 onSelectObject(null);
             }
@@ -1244,6 +1743,11 @@ export function createSceneManager(container, socket, callbacks = {}, background
         const objData = objects[id];
         if (objData) {
             selectedObject = { ...objData };
+            // Attach gizmo to selected object if enabled
+            if (gizmo && gizmo.isEnabled()) {
+                gizmo.attach(objData.object);
+                gizmo.setSelectedObject({ type: objData.type, data: objData.data });
+            }
             if (typeof onSelectObject === 'function') {
                 onSelectObject(selectedObject);
             }
@@ -1270,10 +1774,31 @@ export function createSceneManager(container, socket, callbacks = {}, background
         }
     }
 
+    function getScreenshot(bgColor = null) {
+        const prevColor = new THREE.Color();
+        renderer.getClearColor(prevColor);
+        const prevAlpha = renderer.getClearAlpha();
+        const prevBackgroundColor = scene.background ? scene.background.clone() : null;
+        if (bgColor === null) { // transparent background
+            renderer.setClearColor(0x000000, 0);
+            scene.background = null;
+        } else { // solid background
+            scene.background = new THREE.Color(bgColor[0], bgColor[1], bgColor[2]);
+        }
+        renderer.render(scene, camera);
+        const dataURL = renderer.domElement.toDataURL('image/png');
+        renderer.setClearColor(prevColor, prevAlpha);
+        if (prevBackgroundColor) {
+            scene.background = prevBackgroundColor;
+        } else {
+            scene.background = null;
+        }
+        return dataURL;
+    }
+
     function event_select_object(id) {
         const payload = { selected_object: id };
         if (window.viewerId) payload.viewer_id = window.viewerId;
-        console.log('Emitting events.selected_object with payload:', payload);
         socket.emit('events.select_object', payload);
     }
     
@@ -1285,15 +1810,31 @@ export function createSceneManager(container, socket, callbacks = {}, background
         clearAllObjects,
         dispose,
         applyRenderSettings,
-        applyLightSettings,
         getSelectedObject,
         getAllObjects,
         selectObject,
         updateObject,
         toggleAnimatedMeshPlayback,
+        getScreenshot,
+        setCamera,
+        lookAt,
         renderer,
         scene,
         camera,
-        controls
+        controls,
+        // Gizmo methods
+        gizmo,
+        setGizmoEnabled: (enabled) => {
+            gizmo.setEnabled(enabled);
+            // If enabling and there's a selected object, attach to it
+            if (enabled && selectedObject) {
+                gizmo.attach(selectedObject.object || objects[selectedObject.data.id].object);
+                gizmo.setSelectedObject(selectedObject);
+            }
+        },
+        getGizmoEnabled: () => gizmo.isEnabled(),
+        setGizmoMode: (mode) => gizmo.setMode(mode),
+        getGizmoMode: () => gizmo.getMode(),
+        isGizmoDragging: () => gizmo.isDragging()
     };
 }

@@ -2,19 +2,23 @@
 import io
 import numpy as np
 
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Union
 from .base import SceneObject
+from panopti.materials import MaterialPresets
 
 class Mesh(SceneObject):
-    def __init__(self, viewer, vertices, faces, name: str,
-                wireframe: bool = False, visible: bool = True,
-                opacity: float = 1.0,
-                position: Tuple[float, float, float] = (0, 0, 0),
-                rotation: Tuple[float, float, float] = (0, 0, 0),
-                scale: Tuple[float, float, float] = (1, 1, 1),
-                color: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-                vertex_colors: Optional[List[Tuple[float, float, float]]] = None,
-                face_colors: Optional[List[Tuple[float, float, float]]] = None):
+    def __init__(self, 
+                viewer, 
+                vertices, 
+                faces,
+                name: str,
+                visible: bool = True,
+                position: Union[Tuple[float, float, float], np.ndarray] = (0, 0, 0),
+                rotation: Union[Tuple[float, float, float], np.ndarray] = (0, 0, 0),
+                scale: Union[Tuple[float, float, float], np.ndarray] = (1.0, 1.0, 1.0),
+                vertex_colors: Optional[Union[List[Tuple[float, float, float]], np.ndarray]] = None,
+                face_colors: Optional[Union[List[Tuple[float, float, float]], np.ndarray]] = None,
+                material: Optional[Any] = None):
         super().__init__(viewer, name)
 
         self._check_for_nans(
@@ -22,56 +26,52 @@ class Mesh(SceneObject):
             faces=faces,
             vertex_colors=vertex_colors,
             face_colors=face_colors,
-            color=color,
             position=position,
             rotation=rotation,
             scale=scale,
         )
 
-        self.vertices = self._convert_to_list(vertices)
-        self.faces = self._convert_to_list(faces)
-        self.wireframe = wireframe
+        # Store as numpy arrays internally
+        self.vertices = np.asarray(vertices, dtype=np.float32)
+        self.faces = np.asarray(faces, dtype=np.int32)
         self.visible = visible
-        self.opacity = opacity
-        self.position = position
-        self.rotation = rotation
-        self.scale = scale
-        self.color = color
-        self.vertex_colors = self._convert_to_list(vertex_colors) if vertex_colors is not None else None
-        self.face_colors = self._convert_to_list(face_colors) if face_colors is not None else None
+        self.position = np.asarray(position, dtype=np.float32)
+        self.rotation = np.asarray(rotation, dtype=np.float32)
+        self.scale = np.asarray(scale, dtype=np.float32)
+        self.vertex_colors = np.asarray(vertex_colors, dtype=np.float32) if vertex_colors is not None else None
+        self.face_colors = np.asarray(face_colors, dtype=np.float32) if face_colors is not None else None
+        self.material = material or MaterialPresets.default
+
     
-    def _convert_to_list(self, data):
-        if isinstance(data, np.ndarray):
-            return data.tolist()
-        return data
-    
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, serialize: bool = True) -> Dict[str, Any]:
         data = {
             "id": self.name,
             "name": self.name,
             "type": "mesh",
             "vertices": self.vertices,
             "faces": self.faces,
-            "wireframe": self.wireframe,
             "visible": self.visible,
-            "opacity": self.opacity,
             "position": self.position,
             "rotation": self.rotation,
             "scale": self.scale,
-            "color": self.color,
             "vertex_colors": self.vertex_colors,
             "face_colors": self.face_colors,
             "warnings": self.warnings,
         }
-        return self._sanitize_for_json(data)
+        
+        # Add material data if present
+        if self.material is not None:
+            data["material"] = self.material.to_dict()
+        
+        return self._to_serializable(data) if serialize else data
 
     @property
     def trans_mat(self) -> np.ndarray:
         """Returns the 4x4 transformation matrix corresponding to 
         the object's position, rotation, and scale in the viewer."""
-        tx, ty, tz = np.asarray(self.position, dtype=np.float32)
-        rx, ry, rz = np.asarray(self.rotation, dtype=np.float32)
-        sx, sy, sz = np.asarray(self.scale, dtype=np.float32)
+        tx, ty, tz = self.position.astype(np.float32)
+        rx, ry, rz = self.rotation.astype(np.float32)
+        sx, sy, sz = self.scale.astype(np.float32)
 
         cx, sx_ = np.cos(rx), np.sin(rx)
         cy, sy_ = np.cos(ry), np.sin(ry)
@@ -101,7 +101,7 @@ class Mesh(SceneObject):
     @property
     def viewer_verts(self) -> np.ndarray:
         """Returns the Mesh's vertices under the transformation given by `trans_mat`."""
-        verts = np.array(self.vertices)
+        verts = self.vertices
         ones = np.ones((verts.shape[0], 1))
         hom = np.concatenate([verts, ones], axis=1)
         transformed = (self.trans_mat @ hom.T).T
@@ -114,15 +114,15 @@ class Mesh(SceneObject):
         except ImportError:
             raise ImportError("trimesh is required for exporting to OBJ format. Please install it with 'pip install trimesh'.")
 
-        vertices = np.array(self.vertices)
-        faces = np.array(self.faces)
+        vertices = self.vertices
+        faces = self.faces
 
         # Use trimesh to export
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
         
         # Add vertex colors if available
         if self.vertex_colors is not None:
-            vertex_colors = np.array(self.vertex_colors)
+            vertex_colors = self.vertex_colors
             # Convert to 0-255 range if in 0-1 range
             if vertex_colors.max() <= 1.0:
                 vertex_colors = (vertex_colors * 255).astype(np.uint8)
@@ -130,7 +130,7 @@ class Mesh(SceneObject):
         
         # Add face colors if available  
         if self.face_colors is not None:
-            face_colors = np.array(self.face_colors)
+            face_colors = self.face_colors
             # Convert to 0-255 range if in 0-1 range
             if face_colors.max() <= 1.0:
                 face_colors = (face_colors * 255).astype(np.uint8)

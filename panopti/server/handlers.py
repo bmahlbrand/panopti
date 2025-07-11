@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Dict, Any
-from flask import current_app
+from flask import current_app, request
 from flask_socketio import SocketIO
 
 # Events that update viewer state
@@ -11,7 +11,7 @@ _OBJECT_ADDS = {"add_mesh", "add_animated_mesh", "add_points", "add_arrows"}
 _CONTROL_ADDS = {"add_control"}
 _OBJECT_DELETES = {"delete_object"}
 _CONTROL_DELETES = {"delete_control"}
-_EVENTS = {"events.camera", "events.inspect", "events.select_object"}
+_EVENTS = {"events.camera", "events.inspect", "events.select_object", "events.gizmo"}
 
 def _update_viewer_state(event_type: str, data: Dict[str, Any]) -> None:
     """Update stored viewer state depending on the event type."""
@@ -45,7 +45,9 @@ def create_event_handler(event_type: str, socketio: SocketIO):
     def handler(data: Dict[str, Any]):
         _update_viewer_state(event_type, data)
         viewer_id = data.get("viewer_id")
-        socketio.emit(event_type, data, room=viewer_id)
+        # Avoid sending the event back to the sender to prevent circular updates
+        sender_sid = request.sid if hasattr(request, 'sid') else None
+        socketio.emit(event_type, data, room=viewer_id, skip_sid=sender_sid)
 
     return handler
 
@@ -60,7 +62,7 @@ def register_handlers(app) -> None:
         | _OBJECT_DELETES
         | _CONTROL_DELETES
         | _EVENTS
-        | {"update_object", "update_label", "download_file", "console_output", "camera_info", "selected_object"}
+        | {"update_object", "update_label", "download_file", "console_output", "camera_info", "selected_object", "screenshot", "set_camera", "viewer_heartbeat", "client_heartbeat"}
     ):
         socketio.on(event)(create_event_handler(event, socketio))
 

@@ -5,8 +5,9 @@ import plotly.graph_objects as go
 from panopti.utils import to_rgb
 
 viewer = panopti.connect(server_url="http://localhost:8080", viewer_id='client')
+viewer.capture_prints(capture_stderr=True)
 
-mesh = trimesh.load('./examples/demosthenes.obj')
+mesh = trimesh.load('demosthenes.obj')
 verts, faces = mesh.vertices, mesh.faces
 
 # Add a mesh
@@ -36,11 +37,16 @@ viewer.button(callback=callback_random_rotate, name='Randomly rotate mesh')
 viewer.checkbox(callback=None, name='Y-axis Only', initial=True)
 
 # Override mesh color using a color picker:
-def callback_recolor_mesh(viewer, color):
+def callback_recolor_mesh(viewer, rgba):
     mesh = viewer.get("Statue")
     if mesh is not None:
-        mesh.update(vertex_colors=None)
-        mesh.update(color=(color[0], color[1], color[2]), opacity=color[3])
+        mat = mesh.material
+        mat.color = rgba[:3]
+        mat.opacity = rgba[3]
+        mat.transparency = mat.opacity < 1.0
+
+        # Remove vertex colors and update material:
+        mesh.update(material=mat, vertex_colors=None)
 
 viewer.color_picker(callback=callback_recolor_mesh, name='Recolor Mesh', initial=(0.5, 0.5, 0.5, 1.0))
 
@@ -50,12 +56,12 @@ def callback_add_noise(viewer, value):
     new_verts = verts.copy() + noise
     viewer.get('Statue').update(vertices=new_verts)
     plot_histogram(viewer) # update histogram
-viewer.slider(callback=callback_add_noise, name='GaussinNoiseSTD', min=0.0, max=0.2, initial=0.0, step=0.01)
+viewer.slider(callback=callback_add_noise, name='Gaussian Noise STD', min=0.0, max=0.2, initial=0.0, step=0.01)
 
 # Let's plot a histogram of the mesh vertex y-coordinates:
 def plot_histogram(viewer):
      # Get the y-coordinates of current mesh
-    data = np.asarray(viewer.get('Statue').viewer_verts)[:,1]
+    data = viewer.get('Statue').viewer_verts[:,1]
     counts, bins = np.histogram(data, bins=128)
     bin_centers = 0.5 * (bins[:-1] + bins[1:])
     widths = bins[1:] - bins[:-1]
@@ -87,17 +93,5 @@ def plot_histogram(viewer):
     fig.update_yaxes(title_font_size=12, tickfont_size=8)
     viewer.add_plotly(fig.to_plotly_json(), name='Histogram')
 plot_histogram(viewer)
-
-# import math
-# @viewer.events.camera()
-# def camera_event(viewer, camera_info):
-#     # print('Camera was updated!')
-#     # swivel scene mesh to always face the camera (in Y-axis):
-#     mesh = viewer.get('Statue')
-#     mx, my, mz = mesh.position
-#     cx, cy, cz = camera_info['position']
-#     yaw = math.atan2(cx - mx, cz - mz)
-#     mesh.rotation = [0, yaw, 0]
-#     mesh.update(rotation=[0, yaw, 0])
 
 viewer.hold()
