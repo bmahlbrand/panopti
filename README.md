@@ -3,7 +3,7 @@
   <sub>Interactive 3D Visualization in Python</sub>
 </h1>
 
-![Logo](./docs/assets/images/panopti_logo.jpg)
+![Logo](assets/panopti_logo.jpg)
 
 ## [ [Documentation](https://armanmaesumi.github.io/panopti/) ] - [ [PyPI](https://pypi.org/project/panopti/) ]
 
