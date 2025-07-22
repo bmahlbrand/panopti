@@ -67,7 +67,9 @@ export function initComms(sceneManagerRef, { setIsLoading, setControls, setConso
         },
         request_screenshot: data => {
             if (!sceneManagerRef.current) return { data: null };
-            const screenshot = sceneManagerRef.current.getScreenshot(data.bg_color);
+            const width = data && data.width !== undefined ? data.width : undefined;
+            const height = data && data.height !== undefined ? data.height : undefined;
+            const screenshot = sceneManagerRef.current.getScreenshot(data.bg_color, width, height);
             return { data: screenshot };
         }
     };

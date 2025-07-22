@@ -149,14 +149,21 @@ class RemoteSocketIO:
                     print(f"Registering viewer with ID: {self.viewer_id}")
                     self.client.emit('register_viewer', {'viewer_id': self.viewer_id})
                     print("Registration successful")
-            except ConnectionError:
-                print(f"\n[Panopti] ERROR:")
-                print(f"Could not connect to server at {self.url}. Is the panopti server running? To start the server, run: python -m panopti.run_server --host localhost --port 8080")
-                print("See https://armanmaesumi.github.io/panopti/getting_started/ for more information.")
-                print("Exiting...\n")
-                exit(1)
-            except Exception as e:
-                print(f"[Panopti] Unexpected error connecting to server: {e}")
+            except ConnectionError as exc:
+                msg = (
+                    "\n[Panopti] ERROR:\n"
+                    f"Could not connect to server at {self.url}. Is the panopti server running? To start server, run: python -m panopti.run_server --host localhost --port 8080\n"
+                    "See https://armanmaesumi.github.io/panopti/getting_started/ for more information.\n"
+                    "Exiting...\n"
+                )
+                raise RuntimeError(msg) from exc
+            except Exception as exc:
+                msg = (
+                    "\n[Panopti] ERROR:\n"
+                    f"Unexpected error connecting to server: {exc}\n"
+                    "Exiting...\n"
+                )
+                raise RuntimeError(msg) from exc
     
     def disconnect(self):
         if self.connected:

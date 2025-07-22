@@ -1774,11 +1774,26 @@ export function createSceneManager(container, socket, callbacks = {}, background
         }
     }
 
-    function getScreenshot(bgColor = null) {
+    function getScreenshot(bgColor = null, width = undefined, height = undefined) {
         const prevColor = new THREE.Color();
         renderer.getClearColor(prevColor);
         const prevAlpha = renderer.getClearAlpha();
         const prevBackgroundColor = scene.background ? scene.background.clone() : null;
+
+        // Store previous renderer and camera settings
+        const prevSize = renderer.getSize(new THREE.Vector2());
+        const prevPixelRatio = renderer.getPixelRatio();
+        const prevAspect = camera.aspect;
+        let didResize = false;
+        if (width !== undefined && height !== undefined) {
+            // Set renderer size and camera aspect
+            renderer.setSize(width, height, false);
+            renderer.setPixelRatio(1); // for screenshots, use 1:1 pixel ratio
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+            didResize = true;
+        }
+
         if (bgColor === null) { // transparent background
             renderer.setClearColor(0x000000, 0);
             scene.background = null;
@@ -1787,11 +1802,19 @@ export function createSceneManager(container, socket, callbacks = {}, background
         }
         renderer.render(scene, camera);
         const dataURL = renderer.domElement.toDataURL('image/png');
+        
+        // Restore previous settings
         renderer.setClearColor(prevColor, prevAlpha);
         if (prevBackgroundColor) {
             scene.background = prevBackgroundColor;
         } else {
             scene.background = null;
+        }
+        if (didResize) {
+            renderer.setSize(prevSize.x, prevSize.y, false);
+            renderer.setPixelRatio(prevPixelRatio);
+            camera.aspect = prevAspect;
+            camera.updateProjectionMatrix();
         }
         return dataURL;
     }

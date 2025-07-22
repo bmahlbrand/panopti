@@ -1,5 +1,6 @@
 # panopti/viewer.py
 import threading
+import atexit
 import numpy as np
 import time
 import uuid
@@ -372,7 +373,17 @@ class BaseViewer:
 
 class ViewerClient(BaseViewer):
     """Client that connects to an existing panopti server"""
-    def __init__(self, server_url: str = None, viewer_id: str = None):
+    def __init__(self, server_url: str = None, viewer_id: str = None, *, headless: bool = False, viewport: Optional[Tuple[int, int]] = None):
+        """Initialize a viewer client that connects to an existing panopti server.
+
+        Args:
+            server_url (str, optional): URL of the panopti server to connect to. If not provided,
+                defaults to "http://localhost:8080".
+            viewer_id (str, optional): Unique identifier for this viewer. If not provided,
+                a random id will be generated.
+            headless (bool, optional): Whether to run in headless mode. Defaults to False.
+            viewport (Tuple[int, int], optional): Width and height of the headless viewport. Defaults to (1280, 720) if headless=True.
+        """
         super().__init__()
         
         if not viewer_id:
@@ -398,6 +409,14 @@ class ViewerClient(BaseViewer):
         self.client = RemoteSocketIO(server_url, viewer_id)
         self.client.viewer = self  # Set the viewer reference
         self.client.connect()
+
+        self.headless_browser = None
+        if headless:
+            if viewport is None:
+                viewport = (1280, 720)
+            from .headless import launch
+            self.headless_browser = launch(server_url, width=viewport[0], height=viewport[1])
+            atexit.register(self.headless_browser.close)
 
         # Register handlers for incoming messages:
         self.client.on('ui_event_response', self.handle_ui_event_from_server)
@@ -527,12 +546,13 @@ class ViewerClient(BaseViewer):
         return None
 
     def screenshot(self, filename: str = None, bg_color: Optional[Union[Tuple[float, float, float], np.ndarray]] = None,
-                   timeout: float = 2.0) -> Optional[np.ndarray]:
-        """Capture a screenshot from the frontend viewer.
+                resolution: Optional[Tuple[int, int]] = None, timeout: float = 2.0) -> Optional[np.ndarray]:
+        """Capture a screenshot from the frontend viewer. This function is fully compatible with headless mode.
 
         Parameters:
             filename (str or None): If provided, the image will be saved to this path. Supported extensions are `png` (default), `jpg`, and `jpeg`.
             bg_color (tuple or None): Background color as RGB values in [0,1] range. ``None`` results in a transparent background.
+            resolution (tuple or None): Resolution tuple (W, H) of the screenshot in pixels. If provided, the screenshot will be rendered at this resolution.
             timeout (float): How long to wait for the screenshot data from the frontend. Default is 2 seconds.
 
         Returns:
@@ -541,6 +561,9 @@ class ViewerClient(BaseViewer):
         data = {'viewer_id': self.viewer_id}
         if bg_color is not None:
             data['bg_color'] = list(bg_color)
+        if resolution is not None:
+            data['width'] = resolution[0]
+            data['height'] = resolution[1]
         self.emit_state_request({'event': 'request_screenshot', 'viewer_id': self.viewer_id, 'data': data})
         if self._request_threads['screenshot'].wait(timeout):
             img_b64 = self._request_data['screenshot']
@@ -650,6 +673,16 @@ class ViewerClient(BaseViewer):
         gizmo_data = as_array(gizmo_data)
         self.events.trigger('gizmo', gizmo_data)
 
+    def close(self) -> None:
+        """Close network connections and any headless browser."""
+        if self.client:
+            self.client.disconnect()
+        if getattr(self, 'headless_browser', None):
+            try:
+                self.headless_browser.close()
+            finally:
+                self.headless_browser = None
+
 class ViewerServer:
     """Standalone server without viewer functionality"""
     def __init__(self, host: str = 'localhost', port: int = 8080, debug: bool = False, config_path: str = None):
@@ -661,10 +694,16 @@ class ViewerServer:
         from .server.app import run_standalone_server
         run_standalone_server(host=host, port=port, debug=debug, config_path=config_path)
 
+def connect(server_url: str = None, viewer_id: str = None, *, headless: bool = False, viewport: Optional[Tuple[int, int]] = None) -> ViewerClient:
+    """Connect to an existing panopti server.
 
-def connect(server_url: str = None, viewer_id: str = None) -> ViewerClient:
-    """Connect to an existing panopti server"""
-    return ViewerClient(server_url, viewer_id)
+    Args:
+        server_url (str, optional): URL of the panopti server to connect to. If not provided, defaults to "http://localhost:8080".
+        viewer_id (str, optional): Unique identifier for this viewer. If not provided, a random id will be generated.
+        headless (bool, optional): Whether to run in headless mode. Defaults to False.
+        viewport (Tuple[int, int], optional): Width and height of the headless viewport. Defaults to (1280, 720) if headless=True.
+    """
+    return ViewerClient(server_url, viewer_id, headless=headless, viewport=viewport)
 
 
 def start_server(host: str = 'localhost', port: int = 8080, debug: bool = False, config_path: str = None):
