@@ -435,6 +435,7 @@ class ViewerClient(BaseViewer):
         # events:
         self.client.on('events.camera', self.handle_events_camera)
         self.client.on('events.inspect', self.handle_events_inspect)
+        self.client.on('events.hover', self.handle_events_hover)
         self.client.on('events.select_object', self.handle_events_select_object)
         self.client.on('events.gizmo', self.handle_events_gizmo)
         # events.control is handled internally
@@ -659,6 +660,13 @@ class ViewerClient(BaseViewer):
         inspection_data = data.get('inspection')
         inspection_data = as_array(inspection_data)
         self.events.trigger('inspect', inspection_data)
+
+    def handle_events_hover(self, data):
+        if data.get('viewer_id') != self.viewer_id:
+            return
+        hover_data = data.get('inspection')
+        hover_data = as_array(hover_data)
+        self.events.trigger('hover', hover_data)
 
     def handle_events_select_object(self, data):
         if data.get('viewer_id') != self.viewer_id:

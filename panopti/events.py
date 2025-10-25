@@ -127,7 +127,8 @@ class EventDispatcher:
         self.viewer = viewer
         self._callbacks: Dict[str, List[Callable]] = {
             'camera': [],
-            'inspect': []
+            'inspect': [],
+            'hover': []
         }
         self._throttle_timestamps: Dict[str, float] = {}
 
@@ -224,6 +225,23 @@ class EventDispatcher:
             self._callbacks.setdefault('inspect', []).append(func)
             return func
         return decorator
+
+    def hover(self, throttle: int = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """The `hover` event is triggered when the mouse hovers over geometry in the viewer.
+
+        This provides the same data structure as `inspect` (an `InspectInfo` object),
+        but it is emitted continuously while the cursor moves. Use the `throttle`
+        argument to limit how often your callback is invoked.
+
+        Example usage:
+        ```python
+        @viewer.events.hover(throttle=100)
+        def on_hover(viewer, info):
+            # Show hovered object in your UI, etc.
+            print('Hovering over', info.object_name)
+        ```
+        """
+        return self._create_throttled_decorator('hover', throttle)
     
     def select_object(self) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """The `select_object` event is triggered when a geometric structure is selected in the viewer -- either by clicking on the object directly or selecting it in the layers panel.
@@ -328,6 +346,8 @@ class EventDispatcher:
                 if event == 'camera' and args and isinstance(args[0], dict):
                     args = (_dict_to_camera_info(args[0]),) + args[1:]
                 elif event == 'inspect' and args and isinstance(args[0], dict):
+                    args = (_dict_to_inspect_info(args[0]),) + args[1:]
+                elif event == 'hover' and args and isinstance(args[0], dict):
                     args = (_dict_to_inspect_info(args[0]),) + args[1:]
                 elif event == 'gizmo' and args and isinstance(args[0], dict):
                     args = (_dict_to_gizmo_info(args[0]),) + args[1:]
