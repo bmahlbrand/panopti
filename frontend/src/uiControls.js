@@ -182,9 +182,43 @@ export function ColorPickerControl({ control, handlers }) {
     );
 }
 
-export function renderControl(control, handlers) {
+export function GroupControl({ control, handlers, allControls }) {
+    const [collapsed, setCollapsed] = React.useState(control.collapsed || false);
+    
+    // Get controls that belong to this group
+    const groupControls = allControls.filter(c => c.group === control.id);
+    
+    const toggleCollapsed = () => {
+        setCollapsed(!collapsed);
+    };
+    
+    return React.createElement(
+        'div',
+        { className: 'control-group-container', key: control.id },
+        React.createElement(
+            'div',
+            { 
+                className: 'control-group-header',
+                onClick: toggleCollapsed
+            },
+            React.createElement('i', { 
+                className: `fas fa-chevron-${collapsed ? 'right' : 'down'} group-chevron` 
+            }),
+            React.createElement('span', { className: 'group-label' }, control.name)
+        ),
+        !collapsed && React.createElement(
+            'div',
+            { className: 'control-group-content' },
+            groupControls.map(c => renderControl(c, handlers, allControls))
+        )
+    );
+}
+
+export function renderControl(control, handlers, allControls = []) {
     const h = handlers;
     switch (control.type) {
+        case 'group':
+            return React.createElement(GroupControl, { key: control.id, control, handlers: h, allControls });
         case 'slider':
             return React.createElement(
                 'div',

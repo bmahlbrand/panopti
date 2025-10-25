@@ -563,7 +563,7 @@ const App = () => {
             handleCheckboxChange,
             handleDropdownChange,
             handleColorChange
-        });
+        }, controls);
     
     // Render capture functions
     const captureCurrentView = () =>
@@ -785,7 +785,7 @@ const App = () => {
                 'div',
                 { className: 'ui-panel-content' },
                 controls.length > 0 
-                    ? controls.map(renderControl)
+                    ? controls.filter(c => !c.group).map(renderControl)
                     : React.createElement('p', null, "No controls available.")
             )
         ),

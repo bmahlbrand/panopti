@@ -7,6 +7,7 @@ class UIControl:
     def __init__(self, viewer, name: str):
         self.viewer = viewer
         self.name = name
+        self.group = None  # Which group this control belongs to
     
     def handle_event(self, value: Any = None) -> Optional[str]:
         raise NotImplementedError("Subclasses must implement handle_event()")
@@ -18,11 +19,54 @@ class UIControl:
         """Get the current value of the UI control"""
         raise NotImplementedError("Subclasses must implement value()")
     
+    def _add_common_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Add common fields to the control data dictionary"""
+        if self.group is not None:
+            data['group'] = self.group
+        if hasattr(self.viewer, 'viewer_id'):
+            data['viewer_id'] = self.viewer.viewer_id
+        return data
+    
     def delete(self) -> None:
         if self.name in self.viewer.ui_controls:
             del self.viewer.ui_controls[self.name]
         
         self.viewer.socket_manager.emit_delete_control(self.name)
+
+
+class Group(UIControl):
+    """A collapsible group that can contain other UI controls"""
+    def __init__(self, viewer, name: str, collapsed: bool = False):
+        super().__init__(viewer, name)
+        self.collapsed = collapsed
+        self.controls = []  # List of control names in this group
+    
+    def handle_event(self, value: Any = None) -> Optional[str]:
+        # Groups don't have events themselves
+        return None
+    
+    def value(self) -> bool:
+        """Get the current collapsed state"""
+        return self.collapsed
+    
+    def add_control(self, control: UIControl) -> None:
+        """Add a control to this group"""
+        control.group = self.name
+        self.controls.append(control.name)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        data = {
+            "id": self.name,
+            "name": self.name,
+            "type": "group",
+            "collapsed": self.collapsed,
+            "controls": self.controls
+        }
+        
+        if hasattr(self.viewer, 'viewer_id'):
+            data['viewer_id'] = self.viewer.viewer_id
+        
+        return data
 
 
 class Slider(UIControl):
@@ -61,10 +105,7 @@ class Slider(UIControl):
             "description": self.description
         }
         
-        if hasattr(self.viewer, 'viewer_id'):
-            data['viewer_id'] = self.viewer.viewer_id
-            
-        return data
+        return self._add_common_fields(data)
 
 
 class Button(UIControl):
@@ -86,10 +127,7 @@ class Button(UIControl):
             "type": "button"
         }
         
-        if hasattr(self.viewer, 'viewer_id'):
-            data['viewer_id'] = self.viewer.viewer_id
-            
-        return data
+        return self._add_common_fields(data)
 
 
 class Label(UIControl):
@@ -118,10 +156,7 @@ class Label(UIControl):
             "text": self.text
         }
         
-        if hasattr(self.viewer, 'viewer_id'):
-            data['viewer_id'] = self.viewer.viewer_id
-
-        return data
+        return self._add_common_fields(data)
 
 
 class Checkbox(UIControl):
@@ -153,10 +188,7 @@ class Checkbox(UIControl):
             "description": self.description
         }
         
-        if hasattr(self.viewer, 'viewer_id'):
-            data['viewer_id'] = self.viewer.viewer_id
-            
-        return data
+        return self._add_common_fields(data)
 
 
 class Dropdown(UIControl):
@@ -190,11 +222,7 @@ class Dropdown(UIControl):
             "description": self.description
         }
         
-        # Add viewer_id if the viewer has it (client mode)
-        if hasattr(self.viewer, 'viewer_id'):
-            data['viewer_id'] = self.viewer.viewer_id
-
-        return data
+        return self._add_common_fields(data)
 
 
 class DownloadButton(UIControl):
@@ -224,10 +252,7 @@ class DownloadButton(UIControl):
             "type": "download_button"
         }
 
-        if hasattr(self.viewer, 'viewer_id'):
-            data['viewer_id'] = self.viewer.viewer_id
-
-        return data
+        return self._add_common_fields(data)
 
 
 class ColorPicker(UIControl):
@@ -256,10 +281,7 @@ class ColorPicker(UIControl):
             "initial": self.initial,
         }
 
-        if hasattr(self.viewer, 'viewer_id'):
-            data['viewer_id'] = self.viewer.viewer_id
-
-        return data
+        return self._add_common_fields(data)
 
 
 class PlotlyPlot(UIControl):
@@ -281,7 +303,4 @@ class PlotlyPlot(UIControl):
             "spec": self.spec
         }
 
-        if hasattr(self.viewer, 'viewer_id'):
-            data['viewer_id'] = self.viewer.viewer_id
-
-        return data
+        return self._add_common_fields(data)

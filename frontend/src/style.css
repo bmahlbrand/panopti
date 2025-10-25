@@ -322,6 +322,47 @@ button:active {
     border-color: var(--primary-color);
 }
 
+/* Group control styles */
+.control-group-container {
+    margin-bottom: 8px;
+    background-color: white;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+}
+
+.control-group-header {
+    display: flex;
+    align-items: center;
+    padding: 10px 12px;
+    cursor: pointer;
+    user-select: none;
+    background-color: #f8f9fa;
+    transition: background-color 0.15s ease;
+}
+
+.control-group-header:hover {
+    background-color: #e9ecef;
+}
+
+.group-chevron {
+    margin-right: 8px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    transition: transform 0.2s ease;
+}
+
+.group-label {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text-color);
+}
+
+.control-group-content {
+    padding: 8px;
+    border-top: 1px solid var(--border-color);
+}
+
 /* Scene Toolbar */
 .scene-toolbar {
     position: absolute;

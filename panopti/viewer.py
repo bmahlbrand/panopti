@@ -19,7 +19,7 @@ from .objects.animated_mesh import AnimatedMesh
 from .objects.points import Points
 from .objects.arrows import Arrows
 
-from .ui.controls import Slider, Button, Label, Checkbox, Dropdown, DownloadButton, PlotlyPlot, ColorPicker
+from .ui.controls import Slider, Button, Label, Checkbox, Dropdown, DownloadButton, PlotlyPlot, ColorPicker, Group
 from .utils.parse import as_array, as_list
 
 # Default camera parameters used when a new frontend client connects.
@@ -88,10 +88,21 @@ class BaseViewer:
 
         os.execv(sys.executable, args)
 
-    def _add_control(self, cls, **kwargs):
+    def _add_control(self, cls, group=None, **kwargs):
         """Create a UI control and register it with the server."""
         control = cls(viewer=self, **kwargs)
         self.ui_controls[control.name] = control
+        
+        # If a group is specified, add this control to it
+        if group is not None:
+            if isinstance(group, Group):
+                group.add_control(control)
+            elif isinstance(group, str):
+                # Look up group by name
+                grp = self.ui_controls.get(group)
+                if grp and isinstance(grp, Group):
+                    grp.add_control(control)
+        
         self.socket_manager.emit_add_control(control)
         return control
     
@@ -281,7 +292,7 @@ class BaseViewer:
         return arrows_obj
     
     def slider(self, callback: Callable, name: str, min: float = 0.0, max: float = 1.0,
-              step: float = 0.1, initial: float = 0.5, description: str = "") -> Slider:
+              step: float = 0.1, initial: float = 0.5, description: str = "", group: Union[Group, str, None] = None) -> Slider:
         
         return self._add_control(
             Slider,
@@ -292,22 +303,24 @@ class BaseViewer:
             step=step,
             initial=initial,
             description=description,
+            group=group,
         )
     
-    def button(self, callback: Callable, name: str) -> Button:
+    def button(self, callback: Callable, name: str, group: Union[Group, str, None] = None) -> Button:
         
-        return self._add_control(Button, callback=callback, name=name)
+        return self._add_control(Button, callback=callback, name=name, group=group)
 
-    def download_button(self, callback: Callable, name: str, filename: str = 'download.bin') -> DownloadButton:
+    def download_button(self, callback: Callable, name: str, filename: str = 'download.bin', group: Union[Group, str, None] = None) -> DownloadButton:
 
         return self._add_control(
             DownloadButton,
             callback=callback,
             name=name,
             filename=filename,
+            group=group,
         )
     
-    def label(self, callback: Callable, name: str = None, text: str = '') -> Label:
+    def label(self, callback: Callable, name: str = None, text: str = '', group: Union[Group, str, None] = None) -> Label:
         
         if name is None:
             name = f"label_{uuid.uuid4().hex[:8]}"
@@ -320,7 +333,7 @@ class BaseViewer:
         )
     
     def checkbox(self, callback: Callable, name: str, initial: bool = False,
-                 description: str = "") -> Checkbox:
+                 description: str = "", group: Union[Group, str, None] = None) -> Checkbox:
         
         return self._add_control(
             Checkbox,
@@ -328,10 +341,11 @@ class BaseViewer:
             name=name,
             initial=initial,
             description=description,
+            group=group,
         )
-    
+
     def dropdown(self, callback: Callable, name: str, options: List[str],
-                 initial: str = None, description: str = "") -> Dropdown:
+                 initial: str = None, description: str = "", group: Union[Group, str, None] = None) -> Dropdown:
         
         return self._add_control(
             Dropdown,
@@ -340,16 +354,40 @@ class BaseViewer:
             options=options,
             initial=initial,
             description=description,
+            group=group,
         )
 
     def color_picker(self, callback: Callable, name: str,
-                     initial: Union[Tuple[float, float, float, float], np.ndarray] = (0.5, 0.5, 0.5, 1.0)) -> ColorPicker:
+                     initial: Union[Tuple[float, float, float, float], np.ndarray] = (0.5, 0.5, 0.5, 1.0), 
+                     group: Union[Group, str, None] = None) -> ColorPicker:
 
         return self._add_control(
             ColorPicker,
             callback=callback,
             name=name,
             initial=initial,
+            group=group,
+        )
+
+    def group(self, name: str, collapsed: bool = False) -> Group:
+        """Create a collapsible group for organizing UI controls.
+        
+        Parameters:
+            name (str): The name/label of the group
+            collapsed (bool): Whether the group starts collapsed (default: False)
+            
+        Returns:
+            Group: The created group control
+            
+        Example:
+            group = viewer.group("Settings", collapsed=True)
+            viewer.slider(callback, "param1", group=group)
+            viewer.slider(callback, "param2", group=group)
+        """
+        return self._add_control(
+            Group,
+            name=name,
+            collapsed=collapsed,
         )
 
     def add_plotly(self, spec: Dict[str, Any], name: str) -> PlotlyPlot:
