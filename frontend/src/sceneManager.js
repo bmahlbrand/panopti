@@ -146,6 +146,7 @@ export function createSceneManager(container, socket, callbacks = {}, background
         showGrid: true,
         showAxes: true,
         inspectMode: false,
+        boxInspectMode: false,
     };
 
     const renderer = new THREE.WebGLRenderer({
@@ -244,6 +245,12 @@ export function createSceneManager(container, socket, callbacks = {}, background
     let inspectionPoint = null;
     let inspectionData = null;
 
+    // Box selection (rubber-band) helpers
+    let selectionDiv = null;
+    let selectionStart = null;
+    let selectionActive = false;
+    let selectionThreshold = 4; // px
+
     // Function to clear inspection highlights
     function clearInspectionHighlights() {
         if (inspectionHighlight) {
@@ -269,6 +276,16 @@ export function createSceneManager(container, socket, callbacks = {}, background
         clearInspectionHighlights();
     });
 
+    // Create selection (rubber-band) div
+    selectionDiv = document.createElement('div');
+    selectionDiv.style.position = 'absolute';
+    selectionDiv.style.border = '1px dashed rgba(0,0,0,0.8)';
+    selectionDiv.style.background = 'rgba(0,0,0,0.05)';
+    selectionDiv.style.pointerEvents = 'none';
+    selectionDiv.style.display = 'none';
+    selectionDiv.style.zIndex = '1001';
+    container.appendChild(selectionDiv);
+
     function computeBarycentric(p, a, b, c) {
         const v0 = b.clone().sub(a);
         const v1 = c.clone().sub(a);
@@ -283,6 +300,16 @@ export function createSceneManager(container, socket, callbacks = {}, background
         const w = (d00 * d21 - d01 * d20) / denom;
         const u = 1 - v - w;
         return { u, v, w };
+    }
+
+    // Helper to convert a world Vector3 to screen pixel coordinates relative to container
+    function worldToScreen(worldVec3) {
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+        const proj = worldVec3.clone().project(camera);
+        const x = (proj.x + 1) / 2 * width;
+        const y = (1 - proj.y) / 2 * height;
+        return { x, y };
     }
 
     // Add click event listener for object selection and inspection
@@ -368,7 +395,7 @@ export function createSceneManager(container, socket, callbacks = {}, background
                 }
             }
 
-            if (renderSettings.inspectMode && objectData && (objectData.type === 'mesh' || objectData.type === 'animated_mesh' || objectData.type === 'points')) {
+            if (renderSettings.inspectMode && !renderSettings.boxInspectMode && objectData && (objectData.type === 'mesh' || objectData.type === 'animated_mesh' || objectData.type === 'points')) {
                 clearInspectionHighlights();
 
                 const faceIndex = intersection.faceIndex;
@@ -530,8 +557,9 @@ export function createSceneManager(container, socket, callbacks = {}, background
                     }
                 }
             } else {
-                // Regular selection mode
-                if (objectData) {
+                // Regular selection mode (skip if boxInspectMode active)
+                if (!renderSettings.boxInspectMode) {
+                    if (objectData) {
                     selectedObject = { ...objectData };
 
                     // Attach gizmo to selected object if enabled
@@ -545,6 +573,7 @@ export function createSceneManager(container, socket, callbacks = {}, background
                         onSelectObject(null);
                         onSelectObject({ type: objectData.type, data: objectData.data });
                         event_select_object(objectData.data.id);
+                    }
                     }
                 }
             }
@@ -561,6 +590,165 @@ export function createSceneManager(container, socket, callbacks = {}, background
 
             // Keep inspection overlay visible in inspection mode
         }
+    });
+
+    // Pointer down/up handlers to support box (rubber-band) selection for inspection
+    container.addEventListener('pointerdown', (event) => {
+        if (!renderSettings.boxInspectMode) return;
+        // ignore UI panel origins
+        const target = event.target;
+        const isFromUIPanel = target.closest('.console-window') ||
+                             target.closest('.layers-panel') ||
+                             target.closest('.transform-panel') ||
+                             target.closest('.ui-panel') ||
+                             target.closest('.scene-toolbar') ||
+                             target.closest('.render-toolbar') ||
+                             target.closest('.lighting-toolbar') ||
+                             target.closest('.info-bar');
+        if (isFromUIPanel) return;
+
+        const rect = container.getBoundingClientRect();
+        selectionStart = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+        selectionActive = true;
+        selectionDiv.style.left = selectionStart.x + 'px';
+        selectionDiv.style.top = selectionStart.y + 'px';
+        selectionDiv.style.width = '0px';
+        selectionDiv.style.height = '0px';
+        selectionDiv.style.display = 'none';
+    });
+
+    container.addEventListener('pointermove', (event) => {
+        // existing pointermove handler uses handlePointerMove; we keep that for hover
+        // Only update rubber-band if active
+        if (!selectionActive || !selectionStart) return;
+        const rect = container.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+        const minX = Math.min(selectionStart.x, x);
+        const minY = Math.min(selectionStart.y, y);
+        const w = Math.abs(x - selectionStart.x);
+        const h = Math.abs(y - selectionStart.y);
+        if (w < selectionThreshold && h < selectionThreshold) {
+            selectionDiv.style.display = 'none';
+            return;
+        }
+        selectionDiv.style.display = 'block';
+        selectionDiv.style.left = minX + 'px';
+        selectionDiv.style.top = minY + 'px';
+        selectionDiv.style.width = w + 'px';
+        selectionDiv.style.height = h + 'px';
+    });
+
+    container.addEventListener('pointerup', (event) => {
+        if (!selectionActive || !selectionStart) return;
+        selectionActive = false;
+        const rect = container.getBoundingClientRect();
+        const end = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+        const minX = Math.min(selectionStart.x, end.x);
+        const minY = Math.min(selectionStart.y, end.y);
+        const maxX = Math.max(selectionStart.x, end.x);
+        const maxY = Math.max(selectionStart.y, end.y);
+        selectionDiv.style.display = 'none';
+
+        // If selection too small, ignore (click handled elsewhere)
+        if (Math.abs(end.x - selectionStart.x) < selectionThreshold && Math.abs(end.y - selectionStart.y) < selectionThreshold) {
+            selectionStart = null;
+            return;
+        }
+
+        // Determine target object under the center of the selection area
+        const centerScreen = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+        mouse.x = (centerScreen.x / rect.width) * 2 - 1;
+        mouse.y = - (centerScreen.y / rect.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const selectableObjects = Object.values(objects).map(obj => obj.object).filter(o => o.visible);
+        const intersects = raycaster.intersectObjects(selectableObjects, true);
+        if (intersects.length === 0) {
+            selectionStart = null;
+            return;
+        }
+        let topLevelObject = intersects[0].object;
+        const centerIntersectionPoint = intersects[0].point.clone();
+        while (topLevelObject.parent && topLevelObject.parent !== scene) topLevelObject = topLevelObject.parent;
+
+        // Find objectData
+        let objectData = null;
+        for (const [id, obj] of Object.entries(objects)) {
+            if (obj.object === topLevelObject) {
+                objectData = obj;
+                break;
+            }
+        }
+
+        if (!objectData || !(objectData.type === 'mesh' || objectData.type === 'animated_mesh' || objectData.type === 'points')) {
+            selectionStart = null;
+            return;
+        }
+
+        // Collect vertex indices within the box for mesh/animated_mesh; for points, check instances
+        const targetGeom = topLevelObject.geometry;
+        const posAttr = targetGeom ? targetGeom.getAttribute('position') : null;
+        const foundIndices = [];
+        if (posAttr) {
+            const vertexCount = posAttr.count;
+            const worldMatrix = topLevelObject.matrixWorld;
+            const tmpVec = new THREE.Vector3();
+            for (let i = 0; i < vertexCount; i++) {
+                tmpVec.set(
+                    posAttr.array[i * 3],
+                    posAttr.array[i * 3 + 1],
+                    posAttr.array[i * 3 + 2]
+                );
+                tmpVec.applyMatrix4(worldMatrix);
+                const screen = worldToScreen(tmpVec);
+                // screen coords are relative to container
+                if (screen.x >= minX && screen.x <= maxX && screen.y >= minY && screen.y <= maxY) {
+                    foundIndices.push(i);
+                }
+            }
+        }
+
+        // Highlight found vertices
+        clearInspectionHighlights();
+        if (foundIndices.length > 0) {
+            const pointsGeometry = new THREE.BufferGeometry();
+            const pointPositions = [];
+            const worldMatrix = topLevelObject.matrixWorld;
+            const tmpVec = new THREE.Vector3();
+            for (const idx of foundIndices) {
+                tmpVec.set(
+                    posAttr.array[idx * 3],
+                    posAttr.array[idx * 3 + 1],
+                    posAttr.array[idx * 3 + 2]
+                );
+                tmpVec.applyMatrix4(worldMatrix);
+                pointPositions.push(tmpVec.x, tmpVec.y, tmpVec.z);
+            }
+            pointsGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pointPositions), 3));
+            const pointsMaterial = new THREE.PointsMaterial({ color: 0x00ffff, size: 6, sizeAttenuation: false });
+            inspectionVertexPoints = new THREE.Points(pointsGeometry, pointsMaterial);
+            scene.add(inspectionVertexPoints);
+
+            // Emit inspection event with box selection results
+            if (socket) {
+                const payload = {
+                    inspection: {
+                            object_name: objectData.data.id,
+                            object_type: objectData.type,
+                            inspect_result: {
+                                box: true,
+                                vertex_indices: foundIndices
+                            },
+                            world_coords: [centerIntersectionPoint.x, centerIntersectionPoint.y, centerIntersectionPoint.z],
+                            screen_coords: [minX, minY, maxX, maxY]
+                        }
+                };
+                if (window.viewerId) payload.viewer_id = window.viewerId;
+                socket.emit('events.inspect', payload);
+            }
+        }
+
+        selectionStart = null;
     });
 
     // Hover handling: raycast on pointer move and emit minimal hover payload
@@ -1724,6 +1912,13 @@ export function createSceneManager(container, socket, callbacks = {}, background
 
     function applyRenderSettings(settings) {
         renderSettings = { ...settings };
+
+        // Disable OrbitControls while in box inspect mode so dragging draws a selection
+        try {
+            controls.enabled = !renderSettings.boxInspectMode;
+        } catch (e) {
+            // controls may not be initialized yet
+        }
 
         for (const [id, objData] of Object.entries(objects)) {
             if (objData.type === 'mesh' || objData.type === 'animated_mesh') {

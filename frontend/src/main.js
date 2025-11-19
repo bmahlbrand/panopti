@@ -85,6 +85,7 @@ const App = () => {
         showGrid: true,
         showAxes: true,
         inspectMode: false,
+        boxInspectMode: false,
         powerPreference: 'default'
     });
     const [gizmoEnabled, setGizmoEnabled] = React.useState(false);
